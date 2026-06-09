@@ -1,0 +1,16 @@
+{
+  "findmy": {
+    "enabled": false,
+    "apple_id": "",
+    "device_name_contains": "iPhone",
+    "min_seconds_between_triggers": 130
+  },
+  "screen_flash": {
+    "enabled": true
+  },
+  "app": {
+    "camera_index": 0,
+    "log_file": "mvsa_log.csv",
+    "calibration_file": "mvsa_calibration.json"
+  }
+}

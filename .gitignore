@@ -1,0 +1,10 @@
+.venv/
+.venv312/
+.venv_phone/
+__pycache__/
+*.pyc
+mvsa_log.csv
+mvsa_calibration.json
+*.log
+.env
+.DS_Store
