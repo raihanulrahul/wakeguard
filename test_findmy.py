@@ -5,7 +5,7 @@ Standalone Find My iPhone Play Sound test.
 Run:
     python test_findmy.py
 
-This lets you validate the phone alarm path before relying on MVSA.
+This lets you validate the phone alarm path before relying on WakeGuard.
 """
 
 import json
@@ -80,7 +80,7 @@ def main():
 
     print("\nTriggering Find My Play Sound now...")
     try:
-        device.play_sound(subject="MVSA TEST ALERT")
+        device.play_sound(subject="WakeGuard TEST ALERT")
     except TypeError:
         device.play_sound()
     print("Triggered. Check your iPhone.")

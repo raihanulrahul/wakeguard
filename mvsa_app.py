@@ -40,7 +40,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 
 
-APP_NAME = "MVSA Day-1"
+APP_NAME = "WakeGuard Day-1"
 CONFIG_PATH = Path("mvsa_config.json")
 CALIB_PATH_DEFAULT = Path("mvsa_calibration.json")
 LOG_PATH_DEFAULT = Path("mvsa_log.csv")
@@ -123,81 +123,129 @@ class AlarmBackend:
 class ScreenFlashBackend(AlarmBackend):
     name = "screen_flash"
 
-    def __init__(self, root):
+    def __init__(self, root, acknowledge_callback=None):
         self.root = root
-        self.overlay = None
+        self.acknowledge_callback = acknowledge_callback
+        self.overlays = []
+        self.text_overlay = None
+        self.labels = []
         self.active = False
         self._flash_job = None
         self._state = False
 
-    def _virtual_geometry(self):
-        # Prefer screeninfo for multi-monitor.
+    def _monitor_geometries(self):
+        root_x = 0
+        root_y = 0
+        try:
+            self.root.update_idletasks()
+            root_x = self.root.winfo_rootx()
+            root_y = self.root.winfo_rooty()
+        except Exception:
+            pass
+
         if get_monitors is not None:
             try:
                 mons = get_monitors()
                 if mons:
-                    min_x = min(m.x for m in mons)
-                    min_y = min(m.y for m in mons)
-                    max_x = max(m.x + m.width for m in mons)
-                    max_y = max(m.y + m.height for m in mons)
-                    return max_x - min_x, max_y - min_y, min_x, min_y
+                    geometries = []
+                    for idx, mon in enumerate(mons):
+                        contains_dashboard = (
+                            mon.x <= root_x < mon.x + mon.width and
+                            mon.y <= root_y < mon.y + mon.height
+                        )
+                        geometries.append({
+                            "x": mon.x,
+                            "y": mon.y,
+                            "w": mon.width,
+                            "h": mon.height,
+                            "primary": bool(getattr(mon, "is_primary", False)),
+                            "dashboard": contains_dashboard,
+                            "idx": idx
+                        })
+                    return geometries
             except Exception:
                 pass
 
-        # Windows virtual desktop fallback.
-        if sys.platform.startswith("win"):
-            try:
-                import ctypes
-                user32 = ctypes.windll.user32
-                SM_XVIRTUALSCREEN = 76
-                SM_YVIRTUALSCREEN = 77
-                SM_CXVIRTUALSCREEN = 78
-                SM_CYVIRTUALSCREEN = 79
-                x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-                y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
-                w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-                h = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
-                return w, h, x, y
-            except Exception:
-                pass
+        return [{
+            "x": 0,
+            "y": 0,
+            "w": self.root.winfo_screenwidth(),
+            "h": self.root.winfo_screenheight(),
+            "primary": True,
+            "dashboard": True,
+            "idx": 0
+        }]
 
-        return self.root.winfo_screenwidth(), self.root.winfo_screenheight(), 0, 0
+    def _text_monitor_index(self, geometries):
+        for idx, geo in enumerate(geometries):
+            if geo.get("dashboard"):
+                return idx
+        for idx, geo in enumerate(geometries):
+            if geo.get("primary"):
+                return idx
+        return 0
 
     def trigger(self, level: str, reason: str):
         if self.active:
             return
         self.active = True
-        w, h, x, y = self._virtual_geometry()
-        self.overlay = tk.Toplevel(self.root)
-        self.overlay.title("MVSA ALARM")
-        self.overlay.overrideredirect(True)
-        self.overlay.attributes("-topmost", True)
-        self.overlay.geometry(f"{w}x{h}+{x}+{y}")
+        geometries = self._monitor_geometries()
+        text_idx = self._text_monitor_index(geometries)
 
-        self.label = tk.Label(
-            self.overlay,
-            text=f"MVSA {level.upper()}\n\n{reason}\n\nPress ACKNOWLEDGE in dashboard",
-            font=("Arial", 48, "bold"),
-            fg="black",
-            bg="white",
-            justify="center"
-        )
-        self.label.pack(expand=True, fill="both")
+        for idx, geo in enumerate(geometries):
+            overlay = tk.Toplevel(self.root)
+            overlay.title("WakeGuard ALARM")
+            overlay.overrideredirect(True)
+            overlay.attributes("-topmost", True)
+            overlay.geometry(f"{geo['w']}x{geo['h']}+{geo['x']}+{geo['y']}")
+            for sequence in ("<space>", "<Escape>", "<Control-Shift-A>", "<Control-Shift-a>"):
+                overlay.bind(sequence, self._acknowledge_from_overlay)
+
+            label = None
+            if idx == text_idx:
+                label = tk.Label(
+                    overlay,
+                    text=f"WakeGuard ALARM\n\n{reason}\n\nPress SPACE to acknowledge",
+                    font=("Arial", 48, "bold"),
+                    fg="black",
+                    bg="white",
+                    justify="center",
+                    wraplength=max(320, int(geo["w"] * 0.86))
+                )
+                label.pack(expand=True, fill="both")
+                self.text_overlay = overlay
+            else:
+                overlay.configure(bg="white")
+
+            self.overlays.append(overlay)
+            self.labels.append(label)
+
+        try:
+            (self.text_overlay or self.overlays[0]).focus_force()
+        except Exception:
+            pass
         self._flash()
 
+    def _acknowledge_from_overlay(self, event=None):
+        if self.acknowledge_callback is not None:
+            return self.acknowledge_callback(event)
+        return "break"
+
     def _flash(self):
-        if not self.active or not self.overlay:
+        if not self.active or not self.overlays:
             return
         self._state = not self._state
         bg = "white" if self._state else "red"
         fg = "black" if self._state else "white"
-        try:
-            self.label.configure(bg=bg, fg=fg)
-            self.overlay.configure(bg=bg)
-            self.overlay.lift()
-            self.overlay.attributes("-topmost", True)
-        except Exception:
-            pass
+        for overlay, label in zip(list(self.overlays), list(self.labels)):
+            try:
+                overlay.configure(bg=bg)
+                if label is not None:
+                    label.configure(bg=bg, fg=fg)
+                overlay.lift()
+                overlay.attributes("-topmost", True)
+            except Exception:
+                pass
         self._flash_job = self.root.after(350, self._flash)
 
     def stop(self):
@@ -208,12 +256,14 @@ class ScreenFlashBackend(AlarmBackend):
             except Exception:
                 pass
         self._flash_job = None
-        if self.overlay is not None:
+        for overlay in list(self.overlays):
             try:
-                self.overlay.destroy()
+                overlay.destroy()
             except Exception:
                 pass
-        self.overlay = None
+        self.overlays = []
+        self.labels = []
+        self.text_overlay = None
 
 
 class FindMyBackend(AlarmBackend):
@@ -329,7 +379,7 @@ class FindMyBackend(AlarmBackend):
             return
         self.log_callback("Triggering Find My Play Sound...")
         try:
-            self.device.play_sound(subject=f"MVSA {level}: {reason[:80]}")
+            self.device.play_sound(subject=f"WakeGuard {level}: {reason[:80]}")
         except TypeError:
             self.device.play_sound()
         self.last_trigger = time.time()
@@ -429,6 +479,14 @@ class VisionEngine:
         )
 
     def open(self):
+        if self.face_mesh is None:
+            self.mp_face_mesh = self._load_face_mesh_module()
+            self.face_mesh = self.mp_face_mesh.FaceMesh(
+                max_num_faces=1,
+                refine_landmarks=True,
+                min_detection_confidence=0.45,
+                min_tracking_confidence=0.45
+            )
         self.cap = cv2.VideoCapture(self.camera_index)
         if not self.cap.isOpened():
             raise RuntimeError(f"Could not open webcam index {self.camera_index}")
@@ -442,6 +500,12 @@ class VisionEngine:
             except Exception:
                 pass
         self.cap = None
+        if self.face_mesh is not None:
+            try:
+                self.face_mesh.close()
+            except Exception:
+                pass
+        self.face_mesh = None
 
     def read_features(self):
         if self.cap is None:
@@ -623,6 +687,8 @@ class Calibrator:
             "safe_area": safe.get("area_p50"),
             "tilt_area": tilted.get("area_p50"),
             "safe_pitch": safe.get("pitch_p50"),
+            "safe_yaw": safe.get("yaw_p50"),
+            "safe_roll": safe.get("roll_p50"),
             "tilt_pitch": tilted.get("pitch_p50"),
             "safe_center_y": safe.get("cy_p50"),
             "tilt_center_y": tilted.get("cy_p50"),
@@ -871,10 +937,14 @@ class RiskEngine:
             self._safe_learn(pkt, derived)
 
         debug.update({
+            "presence": 1,
             "eye_risk": eye_risk,
             "eye_ratio": eye_ratio,
             "tilt_risk": tilt_risk,
             "head_risk": head_risk,
+            "pitch": pkt.pitch,
+            "yaw": pkt.yaw,
+            "roll": pkt.roll,
             "stillness_risk": stillness_risk,
             "interaction_risk": interaction_risk,
             "eye_closed_timer": self.eye_closed_timer,
@@ -932,29 +1002,42 @@ class RiskEngine:
         tilt_pitch = d.get("tilt_pitch")
         if pkt.pitch is not None and safe_pitch is not None and tilt_pitch is not None and abs(tilt_pitch - safe_pitch) > 5:
             pitch_score = clamp(abs(pkt.pitch - safe_pitch) / abs(tilt_pitch - safe_pitch), 0, 1)
+        elif pkt.pitch is not None:
+            pitch_score = self._axis_deviation(pkt.pitch, d.get("safe_pitch_low"), d.get("safe_pitch_high"), safe_pitch, 18.0)
 
-        # Area is most reliable for chair back distance. Do not use gaze.
-        return clamp(0.62 * area_score + 0.20 * cy_score + 0.18 * pitch_score, 0, 1)
+        # Area is reliable for chair back distance, while pitch catches neck/head tilt
+        # relative to the user's calibrated safe envelope without assuming Euler sign.
+        weighted = 0.50 * area_score + 0.20 * cy_score + 0.30 * pitch_score
+        pitch_guard = 0.68 * pitch_score
+        return clamp(max(weighted, pitch_guard), 0, 1)
 
     def _head_risk(self, pkt, d):
-        if pkt.pitch is None:
+        pitch_score = self._axis_deviation(
+            pkt.pitch, d.get("safe_pitch_low"), d.get("safe_pitch_high"), d.get("safe_pitch"), 25.0
+        )
+        yaw_score = self._axis_deviation(
+            pkt.yaw, d.get("safe_yaw_low"), d.get("safe_yaw_high"), d.get("safe_yaw"), 35.0
+        )
+        roll_score = self._axis_deviation(
+            pkt.roll, d.get("safe_roll_low"), d.get("safe_roll_high"), d.get("safe_roll"), 28.0
+        )
+        return clamp(max(pitch_score, yaw_score * 0.85, roll_score * 0.9), 0, 1)
+
+    def _axis_deviation(self, value, low, high, center, scale):
+        if value is None:
             return 0.0
 
-        p_low = d.get("safe_pitch_low")
-        p_high = d.get("safe_pitch_high")
-        safe_pitch = d.get("safe_pitch")
-
-        # Use safe envelope from calibration. Camera angle is okay because this is relative.
-        if p_low is not None and p_high is not None:
-            margin = max(7.0, 0.35 * abs(p_high - p_low) + 4.0)
-            if pkt.pitch < p_low - margin:
-                return clamp((p_low - pkt.pitch) / 25.0, 0, 1)
-            if pkt.pitch > p_high + margin:
-                return clamp((pkt.pitch - p_high) / 25.0, 0, 1)
+        # Use calibration-relative envelopes; Euler signs vary by camera and pose solve.
+        if low is not None and high is not None:
+            margin = max(7.0, 0.35 * abs(high - low) + 4.0)
+            if value < low - margin:
+                return clamp((low - value) / scale, 0, 1)
+            if value > high + margin:
+                return clamp((value - high) / scale, 0, 1)
             return 0.0
 
-        if safe_pitch is not None:
-            return clamp(abs(pkt.pitch - safe_pitch) / 30.0, 0, 1)
+        if center is not None:
+            return clamp(abs(value - center) / scale, 0, 1)
         return 0.0
 
     def _stillness_risk(self, pkt, d):
@@ -1005,7 +1088,7 @@ class RiskEngine:
 class MVSAApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("MVSA Dashboard")
+        self.root.title("WakeGuard Dashboard")
         self.root.attributes("-topmost", True)
         self.root.geometry("430x520+50+50")
         self.root.resizable(False, False)
@@ -1024,7 +1107,7 @@ class MVSAApp:
         self.calibration = self._load_calibration()
         self.risk_engine = RiskEngine(self.calibration, self.interaction, self.log_message)
 
-        self.screen_backend = ScreenFlashBackend(root)
+        self.screen_backend = ScreenFlashBackend(root, self._acknowledge_from_key)
         self.findmy_backend = FindMyBackend(root, self.config, self.log_message)
         backends = []
         if self.config.get("screen_flash", {}).get("enabled", True):
@@ -1033,6 +1116,7 @@ class MVSAApp:
         self.alarms = AlarmManager(backends, self.log_message)
 
         self.running = False
+        self.monitor_job_id = None
         self.calibrating = False
         self.calibrator = None
         self.current_stage_idx = 0
@@ -1040,15 +1124,18 @@ class MVSAApp:
 
         self.last_alarm_logged = 0
         self.ack_cooldown_until = 0
+        self.open_eyes_since = None
+        self.face_absent_alarm_since = None
 
         self._build_ui()
+        self._bind_acknowledgement_keys()
         self._ensure_log_header()
         self._keep_on_top()
 
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
 
-        ttk.Label(self.root, text="MVSA Day-1", font=("Arial", 16, "bold")).pack(pady=6)
+        ttk.Label(self.root, text=APP_NAME, font=("Arial", 16, "bold")).pack(pady=6)
 
         row = ttk.Frame(self.root)
         row.pack(fill="x", **pad)
@@ -1095,16 +1182,24 @@ class MVSAApp:
         ttk.Label(self.root, text="Quit: Ctrl+Shift+Q", foreground="gray").pack()
 
     def _refuse_close(self):
-        messagebox.showinfo("MVSA", "MVSA is designed not to close accidentally.\nUse Ctrl+Shift+Q to quit.")
+        messagebox.showinfo("WakeGuard", "WakeGuard is designed not to close accidentally.\nUse Ctrl+Shift+Q to quit.")
+
+    def _bind_acknowledgement_keys(self):
+        for sequence in ("<space>", "<Escape>", "<Control-Shift-A>", "<Control-Shift-a>"):
+            self.root.bind_all(sequence, self._acknowledge_from_key)
+
+    def _acknowledge_from_key(self, event=None):
+        if self.alarms.active:
+            self.acknowledge()
+            return "break"
+        return None
 
     def quit(self):
-        self.running = False
+        self.stop_monitoring()
         try:
-            if self.vision:
-                self.vision.close()
+            self.screen_backend.stop()
         except Exception:
             pass
-        self.screen_backend.stop()
         self.root.destroy()
 
     def _keep_on_top(self):
@@ -1164,7 +1259,7 @@ class MVSAApp:
 
     def start_calibration(self):
         if self.running:
-            messagebox.showwarning("MVSA", "Stop monitoring before calibration.")
+            messagebox.showwarning("WakeGuard", "Stop monitoring before calibration.")
             return
 
         try:
@@ -1222,7 +1317,9 @@ class MVSAApp:
 
     def start_monitoring(self):
         if self.calibration is None:
-            messagebox.showwarning("MVSA", "Calibrate first.")
+            messagebox.showwarning("WakeGuard", "Calibrate first.")
+            return
+        if self.running:
             return
         try:
             self._ensure_vision()
@@ -1231,13 +1328,30 @@ class MVSAApp:
             return
 
         self.running = True
+        self.open_eyes_since = None
+        self.face_absent_alarm_since = None
         self.status_var.set("STARTING")
         self.log_message(f"Monitoring started. Mode={self.mode_var.get()}")
         self._monitor_loop()
 
     def stop_monitoring(self):
         self.running = False
+        if self.monitor_job_id is not None:
+            try:
+                self.root.after_cancel(self.monitor_job_id)
+            except Exception:
+                pass
+            self.monitor_job_id = None
         self.alarms.stop()
+        self.screen_backend.stop()
+        try:
+            if self.vision:
+                self.vision.close()
+        except Exception as e:
+            self.log_message(f"Camera close error: {e}")
+        self.vision = None
+        self.open_eyes_since = None
+        self.face_absent_alarm_since = None
         self.status_var.set("STOPPED")
         self.log_message("Monitoring stopped.")
 
@@ -1245,6 +1359,8 @@ class MVSAApp:
         self.alarms.stop()
         self.risk_engine.battery = max(0, self.risk_engine.battery - 40)
         self.ack_cooldown_until = time.time() + 10
+        self.open_eyes_since = None
+        self.face_absent_alarm_since = None
         result = {
             "status": "ACK",
             "battery": self.risk_engine.battery,
@@ -1255,7 +1371,50 @@ class MVSAApp:
         self._write_event("ACK", result)
         self.log_message("Acknowledged. Short cooldown active.")
 
+    def _auto_clear_alarm_if_awake(self, pkt, result):
+        if not self.alarms.active:
+            self.open_eyes_since = None
+            self.face_absent_alarm_since = None
+            return
+
+        now = time.time()
+        debug = result.get("debug", {})
+        eye_ratio = debug.get("eye_ratio")
+        tilt_risk = debug.get("tilt_risk", 0) or 0
+        cfg = MODE_CONFIGS[self.mode_var.get()]
+        hard_tilt_active = bool(cfg.get("tilt_hard_alarm") and tilt_risk > 0.60)
+
+        if not pkt.face_present:
+            self.open_eyes_since = None
+            if self.face_absent_alarm_since is None:
+                self.face_absent_alarm_since = now
+            if now - self.face_absent_alarm_since >= 3.0:
+                self.alarms.stop()
+                self.ack_cooldown_until = now + 5
+                away_result = dict(result)
+                away_result["reasons"] = ["face absent during alarm"]
+                self._write_event("AUTO_STOP_FACE_ABSENT", away_result)
+                self.log_message("Alarm flash stopped: face absent for 3.0s.")
+            return
+
+        self.face_absent_alarm_since = None
+        clearly_open = eye_ratio is not None and eye_ratio >= 0.75
+        if clearly_open and not hard_tilt_active:
+            if self.open_eyes_since is None:
+                self.open_eyes_since = now
+            if now - self.open_eyes_since >= 3.0:
+                self.alarms.stop()
+                self.ack_cooldown_until = now + 5
+                auto_result = dict(result)
+                auto_result["status"] = "ACK"
+                auto_result["reasons"] = ["open eyes visible for 3.0s"]
+                self._write_event("AUTO_ACK_OPEN_EYES", auto_result)
+                self.log_message("Auto-acknowledged: open eyes visible for 3.0s.")
+        else:
+            self.open_eyes_since = None
+
     def _monitor_loop(self):
+        self.monitor_job_id = None
         if not self.running:
             return
 
@@ -1276,10 +1435,15 @@ class MVSAApp:
                 f"eye={debug.get('eye_risk', 0):.2f} "
                 f"tilt={debug.get('tilt_risk', 0):.2f} "
                 f"head={debug.get('head_risk', 0):.2f} "
+                f"pitch={self._fmt_metric(debug.get('pitch'))} "
+                f"yaw={self._fmt_metric(debug.get('yaw'))} "
+                f"roll={self._fmt_metric(debug.get('roll'))} "
                 f"still={debug.get('stillness_risk', 0):.2f} "
                 f"input={debug.get('interaction_risk', 0):.2f} "
                 f"eyeClosed={debug.get('eye_closed_timer', 0):.1f}s"
             )
+
+            self._auto_clear_alarm_if_awake(pkt, result)
 
             # Alarm behavior. After acknowledge, allow flash to stop briefly but still monitor.
             if result["alarm"] and time.time() > self.ack_cooldown_until:
@@ -1306,7 +1470,16 @@ class MVSAApp:
             self.log_message("Monitor error: " + str(e))
             self.log_message(traceback.format_exc())
 
-        self.root.after(50, self._monitor_loop)
+        if self.running:
+            self.monitor_job_id = self.root.after(50, self._monitor_loop)
+
+    def _fmt_metric(self, value):
+        if value is None:
+            return "n/a"
+        try:
+            return f"{float(value):.1f}"
+        except Exception:
+            return "n/a"
 
 
 def main():

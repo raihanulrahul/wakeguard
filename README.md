@@ -1,9 +1,9 @@
 
-# MVSA Day-1 Build
+# WakeGuard Day-1 Build
 
-MVSA = Minimum Viable Save-My-Ass.
+WakeGuard is a local vigilance assistant for Rahul's office use.
 
-This is a local Python vigilance assistant for Rahul's office use.
+The current implementation still uses `mvsa_*` filenames until the files are renamed separately.
 
 ## What it does
 
@@ -45,7 +45,7 @@ You need:
 - Internet connection
 - 2FA code during first login
 
-## Run MVSA
+## Run WakeGuard
 
 ```bash
 python mvsa_app.py
@@ -101,7 +101,7 @@ Edit `mvsa_config.json` after first run:
 }
 ```
 
-For security, MVSA does not store your Apple ID password in the config. It asks at startup when needed.
+For security, WakeGuard does not store your Apple ID password in the config. It asks at startup when needed.
 
 ## Quit
 
@@ -115,6 +115,6 @@ to quit.
 
 - No video is saved.
 - Only logs are saved to CSV.
-- If face is absent, MVSA assumes you are away from the chair and discharges risk.
+- If face is absent, WakeGuard assumes you are away from the chair and discharges risk.
 - On high-risk days, use Super Alert.
 - Do not rely on this as a medical or safety system. Do not drive or operate dangerous machinery when sleep deprived or affected by sedatives.
