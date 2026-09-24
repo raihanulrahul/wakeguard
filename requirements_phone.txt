@@ -1,0 +1,2 @@
+# Isolated .venv_phone only; protobuf requirements differ from legacy MediaPipe.
+pyicloud==2.6.5

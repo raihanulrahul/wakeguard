@@ -1,0 +1,60 @@
+name: WakeGuard verification
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      WAKEGUARD_GUI_TESTS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Isolated vision dependency install
+        shell: pwsh
+        run: |
+          python -m venv .venv_wakeguard
+          & .\.venv_wakeguard\Scripts\python.exe -m pip install -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\.venv_wakeguard\Scripts\python.exe -m pip check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: MediaPipe binary smoke and regression tests
+        shell: pwsh
+        run: |
+          & .\.venv_wakeguard\Scripts\python.exe scripts\doctor.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\.venv_wakeguard\Scripts\python.exe -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Separate phone environment import - NO Apple connection
+        shell: pwsh
+        run: |
+          python -m venv .venv_phone
+          & .\.venv_phone\Scripts\python.exe -m pip install -r requirements_phone.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\.venv_phone\Scripts\python.exe -m pip check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\.venv_phone\Scripts\python.exe -c "import pyicloud; print('Phone import passed; no network/account use')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Parse Windows scripts without playing sound or opening microphone
+        shell: powershell
+        run: |
+          $files = @('Setup-WakeGuard.ps1', 'scripts\speak.ps1', 'scripts\voice.ps1')
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $pwd $file), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { $errors | Write-Output; exit 1 }
+          }
+          Add-Type -AssemblyName System.Speech
+          $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+          $synth.SetOutputToNull()
+          $synth.Speak('WakeGuard synthesis smoke test')
+          $synth.Dispose()

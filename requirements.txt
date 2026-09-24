@@ -1,6 +1,15 @@
+# Vision/UI environment ONLY. Python 3.12 x64.
+# Never add pyicloud or a second OpenCV distribution to this environment.
 numpy==1.26.4
 opencv-contrib-python==4.11.0.86
 mediapipe==0.10.21
-screeninfo
-pynput
-msvc-runtime
+protobuf>=4.25.3,<5
+jax==0.4.38
+jaxlib==0.4.38
+scipy==1.13.1
+matplotlib==3.9.4
+ml-dtypes==0.5.4
+Pillow>=10.4,<13
+screeninfo==0.8.1
+pynput==1.8.2
+msvc-runtime==14.44.35112; sys_platform == "win32"
