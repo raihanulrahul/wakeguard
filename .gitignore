@@ -17,3 +17,5 @@ icloud_session/
 *.cookies
 .DS_Store
 Thumbs.db
+.bootstrap/
+.runtime/

@@ -1,0 +1,58 @@
+name: Private runtime isolation check
+on:
+  push:
+    paths:
+      - 'Setup-WakeGuard-Private.ps1'
+      - '.github/workflows/private-setup.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolated-install:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create an unrelated project baseline using the existing default Python
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $other = Join-Path $env:RUNNER_TEMP 'unrelated-project'
+          python -m venv $other
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create unrelated test project' }
+          & "$other\Scripts\python.exe" -m pip list --format=json | Set-Content "$env:RUNNER_TEMP\unrelated-before.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inventory unrelated test project' }
+          (Get-Command python.exe).Source | Set-Content "$env:RUNNER_TEMP\default-python-before.txt"
+          python -c "import sys; print(sys.executable); print(sys.version)" | Set-Content "$env:RUNNER_TEMP\python-version-before.txt"
+      - name: Full private-runtime setup on Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PIP_TARGET = Join-Path $env:RUNNER_TEMP 'must-not-receive-packages'
+          & .\Setup-WakeGuard-Private.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Private setup failed' }
+          if (Test-Path -LiteralPath $env:PIP_TARGET) { throw 'Inherited PIP_TARGET was used' }
+          Remove-Item Env:PIP_TARGET
+      - name: Verify unrelated Python and project unchanged; test the private UI stack
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $other = Join-Path $env:RUNNER_TEMP 'unrelated-project'
+          & "$other\Scripts\python.exe" -m pip list --format=json | Set-Content "$env:RUNNER_TEMP\unrelated-after.json"
+          (Get-Command python.exe).Source | Set-Content "$env:RUNNER_TEMP\default-python-after.txt"
+          python -c "import sys; print(sys.executable); print(sys.version)" | Set-Content "$env:RUNNER_TEMP\python-version-after.txt"
+          foreach ($name in @('unrelated','default-python','python-version')) {
+            $ext = if ($name -eq 'unrelated') { 'json' } else { 'txt' }
+            $a = Get-Content "$env:RUNNER_TEMP\$name-before.$ext" -Raw
+            $b = Get-Content "$env:RUNNER_TEMP\$name-after.$ext" -Raw
+            if ($a -cne $b) { throw "Unrelated environment changed: $name" }
+          }
+          $env:WAKEGUARD_GUI_TESTS='1'
+          & .\.venv_wakeguard\Scripts\python.exe -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Regression tests failed' }
+          Write-Host 'PASS: unrelated default Python and project package inventory preserved.'
+      - name: Retest safe reuse without reinstalling a system Python
+        shell: powershell
+        run: |
+          & .\Setup-WakeGuard-Private.ps1 -SkipTests
+          if ($LASTEXITCODE -ne 0) { throw 'Repeat private setup failed' }
