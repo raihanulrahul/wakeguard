@@ -217,7 +217,9 @@ class InputMonitor:
                 elif k in ("space", "esc", "r", "b"):
                     action = k
                 if action:
-                    self.events.put(action)
+                    # Only command metadata, never arbitrary key contents. Stale
+                    # queued commands must not cross a setup/alert transition.
+                    self.events.put({"action": action, "at": self.last_activity})
 
             def release(key) -> None:
                 held.discard(name(key))

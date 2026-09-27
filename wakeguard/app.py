@@ -22,6 +22,7 @@ from .engine import Engine, MODES
 from .model import Observation, Profile, data_home, atomic_json, angle_delta
 from .phone import PhoneBackend
 from .runtime import Channel, InputMonitor, Speech, ROOT, powershell_path
+from .keyboard import KeyboardRouter
 
 
 class App:
@@ -59,6 +60,8 @@ class App:
         self.poll_job = None
         self.closing = False
         self.preview_photo = None
+        self._dialog_depth = 0
+        self._input_epoch = time.monotonic()
         self.root.title(f"WakeGuard {__version__}" + (" — SYNTHETIC DEMO" if demo else ""))
         self.root.geometry("600x820")
         self.root.minsize(560, 700)
@@ -160,10 +163,7 @@ class App:
             ttk.Combobox(outer, textvariable=self.scenario, state="readonly", values=["Awake", "Eyes closed", "Half closed", "Reclined awake", "Neck down", "Occluded", "Empty chair", "Camera failed"]).pack(fill="x")
 
     def _bind_keys(self):
-        for sequence, action in (("<space>", "space"), ("<Escape>", "esc"), ("<r>", "r"), ("<b>", "b"),
-                                 ("<Control-Shift-A>", "space"), ("<Control-Shift-a>", "space"),
-                                 ("<Control-Alt-s>", "stop"), ("<Control-Shift-Q>", "quit"), ("<Control-Shift-q>", "quit")):
-            self.root.bind_all(sequence, lambda event, a=action: self._key(event, a))
+        self.keys = KeyboardRouter(self.root, self._key)
         self.root.bind("<Unmap>", self._restore_if_monitoring)
 
     def _restore_if_monitoring(self, event):
@@ -171,11 +171,56 @@ class App:
             self.root.after_idle(self.root.deiconify)
 
     def _key(self, event, action):
-        if action not in ("stop", "quit", "esc") and isinstance(event.widget, (tk.Entry, ttk.Entry, ttk.Combobox, ttk.Spinbox, tk.Text)):
-            return None
-        if self.action(action):
+        # Setup owns these keys BEFORE ttk.Button's SPACE-to-invoke binding.
+        # Even a debounced/ignored key must not fall through and click Calibrate.
+        if action in ("stop", "quit"):
+            self.action(action)
             return "break"
-        return None
+        if self._dialog_depth:
+            return None
+        if self.state in ("CALIBRATING", "VERIFYING") or self.screen.active:
+            self.action(action)
+            return "break"
+        if isinstance(event.widget, (tk.Entry, ttk.Entry, ttk.Combobox, ttk.Spinbox, tk.Text)):
+            return None
+        return "break" if self.action(action) else None
+
+    def _handle_global_input(self, item):
+        # Tk owns foreground controls. The low-level listener is a fallback for
+        # alarms/emergency shortcuts, never a second calibration input stream.
+        action = item.get("action") if isinstance(item, dict) else item
+        if action not in ("space", "esc", "r", "b", "stop", "quit"):
+            return
+        if action in ("stop", "quit"):
+            self.action(action)
+            return
+        if self._dialog_depth or self.state in ("CALIBRATING", "VERIFYING") or self.speech.busy:
+            return
+        try:
+            if self.root.focus_get() is not None:
+                return
+        except (tk.TclError, KeyError):
+            return
+        at = item.get("at") if isinstance(item, dict) else None
+        if at is not None:
+            if not isinstance(at, (int, float)) or not self._input_epoch <= at <= time.monotonic():
+                return
+            if time.monotonic() - at > .8:
+                return
+        if self.screen.active and action in ("space", "esc"):
+            self.action(action)
+
+    def _ask_setup(self, function, *args, **kwargs):
+        # A dialog runs a nested Tk loop. Guard re-entry and never replay its
+        # confirming keystroke as a response to the next setup stage.
+        if self._dialog_depth:
+            return False
+        self._dialog_depth += 1
+        try:
+            return function(*args, **kwargs)
+        finally:
+            self._dialog_depth -= 1
+            self._input_epoch = time.monotonic()
 
     def action(self, action):
         now = time.monotonic()
@@ -186,14 +231,17 @@ class App:
             self.quit(); return True
         if action == "stop":
             self.stop_all(); return True
+        if self._dialog_depth:
+            return False
         if self.screen.active and action in ("space", "esc"):
             self.acknowledge(); return True
         if action == "esc" and self.state in ("CALIBRATING", "VERIFYING"):
             self.stop_all(); return True
         if self.state == "CALIBRATING":
             if self.cal_phase == "READY" and action == "space":
-                self._say("Prepare the requested posture. Three, two, one. Begin.", self._capture_begin)
                 self.cal_phase = "PROMPT"
+                self.status.set(f"STEP {self.cal.index + 1}/{len(STAGES)} · COUNTDOWN")
+                self._say("Prepare the requested posture. Three, two, one. Begin.", self._capture_begin)
             elif self.cal_phase == "REVIEW" and action == "space" and self.cal_good:
                 if self.cal.advance():
                     self._prompt_stage()
@@ -284,29 +332,38 @@ class App:
     def test_speech(self):
         if self.state == "MONITORING":
             messagebox.showinfo("WakeGuard", "Stop monitoring before testing calibration audio.", parent=self.root); return
-        if self.state in ("CALIBRATING", "VERIFYING"):
+        if self.state in ("CALIBRATING", "VERIFYING") or self.speech.busy or self._dialog_depth:
             return
         def confirm():
-            self.audio_confirmed = self.testing or self.demo or messagebox.askyesno("Calibration audio", "Did you clearly hear the speech?\nUse your preferred output device; monitoring will stay silent on the PC.", parent=self.root)
-            self.log("Calibration speech confirmed." if self.audio_confirmed else "Calibration speech not confirmed.")
+            self.audio_confirmed = self.testing or self.demo or self._ask_setup(messagebox.askyesno,
+                "Calibration audio", "Did you clearly hear the speech?\nUse your preferred output device; monitoring will stay silent on the PC.", parent=self.root)
+            if not self.closing:
+                self.log("Calibration speech confirmed." if self.audio_confirmed else "Calibration speech not confirmed.")
         self._say("WakeGuard audio check. Instructions will be spoken before each setup step. You may respond with the space key without looking at the screen.", confirm)
 
     def begin_calibration(self):
+        # Idempotent through every setup phase, including PROMPT/READY/REVIEW.
+        # Re-clicking Calibrate must not discard accepted samples or reopen consent.
+        if self.state in ("CALIBRATING", "VERIFYING") or self.speech.busy or self._dialog_depth:
+            return
         if self.state == "MONITORING":
             messagebox.showinfo("WakeGuard", "Press Stop before calibration.", parent=self.root); return
-        if self.cal_phase == "CAPTURE":
-            return
         if not self.audio_confirmed:
             self.detail.set("First press Test speech and confirm you can hear it. Eye-closed stages will not start without audio.")
             return
         if self.latest is None or time.monotonic() - self.latest.t > 1 or not self.latest.camera_ok:
             self.detail.set("Open Preview and wait for live camera measurements first."); return
-        if not self.testing and not messagebox.askokcancel("Calibration", "This is setup, not an alertness test. Remain safely seated; do not attempt it while unable to stay awake.\n\nOnly the labelled closed-eye captures last 3 seconds. Spoken prompts tell you when to open your eyes. SPACE confirms each step; R repeats; Esc stops everything.\n\nAllow calibration speech now?", parent=self.root):
+        prior_state = self.state
+        if not self.testing and not self._ask_setup(messagebox.askokcancel,
+                "Calibration", "This is setup, not an alertness test. Remain safely seated; do not attempt it while unable to stay awake.\n\nOnly the labelled closed-eye captures last 3 seconds. Spoken prompts tell you when to open your eyes. SPACE confirms each step; R repeats; Esc stops everything.\n\nAllow calibration speech now?", parent=self.root):
             return
+        if self.closing or self.state != prior_state or self.latest is None:
+            return  # Stop/Quit may have been requested inside the dialog's event loop.
         self.state, self.verified = "CALIBRATING", False
         self.cal = CalibrationSession()
         if self.voice_enabled.get():
             self._start_voice()
+        self.root.focus_set()
         self._prompt_stage()
 
     def _start_voice(self):
@@ -322,32 +379,41 @@ class App:
         self.cal.recording = False
         self.cal_good = False
         self.cal_phase = "PROMPT"
+        self._input_epoch = time.monotonic()
         stage = self.cal.stage
         eye_notice = "Keep your eyes OPEN until you hear Begin. " if stage.eyes in ("closed", "half") else ""
         text = f"Step {self.cal.index + 1} of {len(STAGES)}. {eye_notice}{stage.instruction} Press space when ready."
         self.cal_text.set(text)
+        self.status.set(f"STEP {self.cal.index + 1}/{len(STAGES)} · INSTRUCTION")
         self.detail.set("Prepare first. Collection starts ONLY after ready and countdown. R repeats; B goes back.")
         self._say(text, lambda: self._ready("CALIBRATING"))
 
     def _ready(self, state):
         if self.state == state:
             self.cal_phase = "READY"
-            self.status.set("SETUP · READY")
+            self._input_epoch = time.monotonic()
+            step = self.cal.index + 1 if self.cal is not None and state == "CALIBRATING" else self.verify_index + 1
+            self.status.set(f"STEP {step} · READY — press SPACE")
 
     def _capture_begin(self):
-        if self.state != "CALIBRATING":
+        if self.state != "CALIBRATING" or self.cal is None or self.cal_phase != "PROMPT":
             return
         self.cal.begin(time.monotonic())
         self.cal_phase = "CAPTURE"
+        self._input_epoch = time.monotonic()
+        self.log(f"Step {self.cal.index + 1}/{len(STAGES)}: capturing {self.cal.stage.key}.", "CALIBRATION_CAPTURE")
 
     def _capture_done(self):
         try:
             self.cal.finish()
             self.cal_good = True
             result = "Sample complete. Press space to accept and continue, or R to repeat."
+            self.log(f"Step {self.cal.index + 1}/{len(STAGES)} accepted for review: "
+                     f"{len(self.cal.current)} usable frames, {self.cal.valid_seconds:.1f}s. SPACE advances.", "CALIBRATION_SAMPLE")
         except CalibrationError as exc:
             self.cal_good = False
             result = str(exc) + ". Press R to repeat, B to go back, or Escape to stop."
+            self.log(f"Step {self.cal.index + 1}/{len(STAGES)} needs a repeat: {exc}", "CALIBRATION_RETRY")
         self.cal_phase = "PROMPT"
         self.cal_text.set(result)
         self._say("Open your eyes. " + result, lambda: self._review_ready())
@@ -355,16 +421,21 @@ class App:
     def _review_ready(self):
         if self.state == "CALIBRATING":
             self.cal_phase = "REVIEW"
+            self._input_epoch = time.monotonic()
+            suffix = "SAMPLE OK — SPACE: next" if self.cal_good else "REPEAT NEEDED — press R"
+            self.status.set(f"STEP {self.cal.index + 1} · {suffix}")
 
     def choose_stage(self):
-        if self.state != "CALIBRATING" or self.cal_phase == "CAPTURE":
+        if self.state != "CALIBRATING" or self.cal_phase not in ("READY", "REVIEW"):
             return
         dialog = tk.Toplevel(self.root); dialog.title("Repeat a calibration stage"); dialog.attributes("-topmost", True)
         selected = tk.StringVar(value=STAGES[self.cal.index].key)
         ttk.Combobox(dialog, textvariable=selected, values=[s.key for s in STAGES], state="readonly", width=30).pack(padx=15, pady=15)
         def go():
+            if self.state != "CALIBRATING" or self.cal is None:
+                dialog.destroy(); return
             self.cal.index = [s.key for s in STAGES].index(selected.get())
-            dialog.destroy(); self._prompt_stage()
+            dialog.destroy(); self.root.focus_set(); self._prompt_stage()
         ttk.Button(dialog, text="Repeat selected stage", command=go).pack(pady=10)
 
     def _finish_calibration(self):
@@ -401,6 +472,8 @@ class App:
     def begin_verification(self):
         if self.state not in ("PREVIEW", "STOPPED") or self.profile is None:
             self.detail.set("A valid calibration and live Preview are required first."); return
+        if self.speech.busy or self._dialog_depth:
+            return
         if self.latest is None or time.monotonic() - self.latest.t > 1:
             self.detail.set("Start Preview first."); return
         if not self.audio_confirmed and not self.demo:
@@ -412,8 +485,10 @@ class App:
 
     def _verify_prompt(self):
         self.cal_phase = "PROMPT"
+        self._input_epoch = time.monotonic()
         text = self.VERIFY[self.verify_index][2]
         self.cal_text.set(text)
+        self.status.set(f"VERIFY {self.verify_index + 1}/{len(self.VERIFY)} · INSTRUCTION")
         self._say(text, lambda: self._ready("VERIFYING"))
 
     def _verify_finish(self):
@@ -470,15 +545,23 @@ class App:
         self.screen.stop()
         self.engine = Engine(self.profile, self.mode.get())
         self.state = "MONITORING"
+        self._input_epoch = time.monotonic()
         self.status.set("MONITORING")
         self.cal_text.set("SPACE / ESC acknowledges · Ctrl+Alt+S stops everything · 3s open eyes clears (except forbidden recline)")
         self.log("Monitoring started; " + ("phone enabled." if self.phone.enabled else "SCREEN-ONLY TEST."), "START")
+
+    def _show_screen(self, reason, test=False):
+        if not self.screen.active:
+            self._input_epoch = time.monotonic()
+        self.screen.start(reason, test=test)
+        for window in self.screen.windows:
+            self.keys.attach_tree(window)
 
     def test_screen(self):
         if self.state in ("CALIBRATING", "VERIFYING"):
             return
         self.screen.pulse = self.pulse.get()
-        self.screen.start("Screen test. Press SPACE or ESC. The STOP EVERYTHING button also remains available.", test=True)
+        self._show_screen("Screen test. Press SPACE or ESC. The STOP EVERYTHING button also remains available.", test=True)
 
     def acknowledge(self):
         had_alarm = self.screen.active or (self.engine is not None and self.engine.active)
@@ -566,6 +649,7 @@ class App:
         self.engine = None
         self.latest = self.last_decision = None
         self.verify_samples = []
+        self._input_epoch = time.monotonic()
         errors = []
         for resource in (self.screen, self.speech, self.voice, self.camera, self.phone, self.inputs):
             try:
@@ -596,6 +680,7 @@ class App:
                 except tk.TclError:
                     pass
             self.poll_job = None
+            self.keys.close()
             self.root.destroy()
 
     def _callback_error(self, typ, value, tb):
@@ -667,14 +752,16 @@ class App:
             for _ in range(50):
                 if self.inputs.events.empty():
                     break
-                self.action(self.inputs.events.get())
+                self._handle_global_input(self.inputs.events.get())
+            if self.closing:
+                return
             for event in self.phone.poll():
                 self._phone_event(event)
             self.phone_text.set("Phone: " + self.phone.status + (" · tested" if self.phone.heard_test else " · NOT VERIFIED AUDIBLE"))
             self.screen.pulse = self.pulse.get()
             o = self.latest
             if self.state == "CALIBRATING" and self.cal_phase == "CAPTURE":
-                self.status.set(f"CAPTURE {max(0, self.cal.stage.seconds-(now-self.cal.started)):.1f}s")
+                self.status.set(f"STEP {self.cal.index + 1}/{len(STAGES)} · CAPTURE {max(0, self.cal.stage.seconds-(now-self.cal.started)):.1f}s")
                 if self.cal.due(now):
                     self._capture_done()
             if self.state == "VERIFYING" and self.cal_phase == "CAPTURE":
@@ -694,7 +781,7 @@ class App:
                     self.log("Alert cleared by fresh open-eye recovery or confirmed empty chair.", "AUTO_CLEAR", decision)
                 if decision.alarm:
                     try:
-                        self.screen.start("; ".join(decision.reasons))
+                        self._show_screen("; ".join(decision.reasons))
                     except Exception:
                         self.log("Screen renderer failed. Stop remains available; phone attempted separately.", "SCREEN_ERROR")
                     try:

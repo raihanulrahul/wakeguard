@@ -7,13 +7,12 @@ import os
 import tempfile
 import time
 import unittest
-from dataclasses import asdict
 from unittest.mock import Mock, patch
 import tkinter as tk
 from tkinter import ttk
 
 from wakeguard.app import App
-from wakeguard.calibration import CalibrationSession
+from wakeguard.calibration import STAGES
 from wakeguard.demo import observation
 from test_core import full_calibration
 
@@ -65,7 +64,11 @@ class SetupKeyboardTests(unittest.TestCase):
         widget.event_generate("<KeyPress>", keysym=keysym)
         self.root.update()
         if release and not self.app.closing:
-            widget.event_generate("<KeyRelease>", keysym=keysym)
+            # An ACK may have destroyed the overlay holding keyboard focus.
+            target = widget if widget.winfo_exists() else self.root
+            target.focus_force()
+            self.root.update()
+            target.event_generate("<KeyRelease>", keysym=keysym)
             self.root.update()
 
     def ready(self):
@@ -213,14 +216,90 @@ class SetupKeyboardTests(unittest.TestCase):
     def test_test_screen_focused_stop_button_space_only_acknowledges(self):
         self.app.test_screen()
         self.root.update()
-        button = self.button("STOP EVERYTHING")
-        # Locate the overlay's button rather than the dashboard's identical label.
         button = next(w for w in self.widgets() if isinstance(w, tk.Button)
                       and w.cget("text") == "STOP EVERYTHING")
         self.focus(button)
         self.press(button)
         self.assertFalse(self.app.screen.active)
         self.assertEqual(self.app.state, "PREVIEW", "SPACE must ACK, not also click STOP")
+
+    def test_full_fifteen_stage_keyboard_progression(self):
+        original = self.ready()
+        button = self.button("Calibrate")
+        for index in range(len(STAGES)):
+            with self.subTest(stage=index + 1):
+                self.assertIs(self.app.cal, original)
+                self.assertEqual(self.app.cal.index, index)
+                self.assertEqual(self.app.cal_phase, "READY")
+                self.app.last_actions.clear()
+                self.focus(button)
+                self.press(button)
+                self.pump()
+                self.assertEqual(self.app.cal_phase, "CAPTURE")
+                self.finish_sample()
+                self.app.last_actions.clear()
+                self.focus(button)
+                self.press(button)
+                self.pump()
+        self.assertIsNone(self.app.cal)
+        self.assertEqual(self.app.state, "PREVIEW")
+        self.assertTrue(self.app.profile_path.exists())
+
+    def test_repeat_and_previous_preserve_accepted_samples(self):
+        original = self.ready()
+        self.app.action("space")
+        self.pump()
+        self.finish_sample()
+        self.app.last_actions.clear()
+        self.app.action("space")
+        self.pump()
+        accepted = list(original.samples["main"])
+        button = self.button("Calibrate")
+        self.focus(button)
+        self.press(button, "r")
+        self.pump()
+        self.assertIs(self.app.cal, original)
+        self.assertEqual(original.index, 1)
+        self.assertEqual(original.samples["main"], accepted)
+        self.press(button, "b")
+        self.pump()
+        self.assertEqual(original.index, 0)
+        self.assertEqual(original.samples["main"], accepted)
+
+    def test_consent_dialog_is_not_reopened_by_space(self):
+        self.app.testing = False  # exercise the consent path, but fake its dialog
+        with patch("wakeguard.app.messagebox.askokcancel", return_value=True) as consent:
+            original = self.ready()
+            button = self.button("Calibrate")
+            self.focus(button)
+            self.press(button)
+            self.pump()
+            consent.assert_called_once()
+            self.assertIs(self.app.cal, original)
+            self.assertEqual(self.app.cal_phase, "CAPTURE")
+
+    def test_speech_test_reentry_does_not_replace_pending_callback(self):
+        self.app.test_speech()
+        token = self.app.speech.token
+        callback = self.app.speech_after
+        self.app.test_speech()
+        self.assertEqual(self.app.speech.token, token)
+        self.assertIs(self.app.speech_after, callback)
+
+    def test_countdown_failure_retains_audio_failed_phase(self):
+        self.ready()
+        with patch.object(self.app.speech, "say", side_effect=OSError("audio unavailable")):
+            self.app.action("space")
+        self.assertEqual(self.app.cal_phase, "AUDIO FAILED")
+        self.assertFalse(self.app.cal.recording)
+
+    def test_global_emergency_stop_still_works_during_prompt(self):
+        self.ready()
+        self.app._prompt_stage()
+        self.app.inputs.events.put({"action": "stop", "at": time.monotonic()})
+        self.pump()
+        self.assertEqual(self.app.state, "STOPPED")
+        self.assertIsNone(self.app.cal)
 
 
 if __name__ == "__main__":
