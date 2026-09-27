@@ -90,11 +90,15 @@ def main():
                 minimum, maximum = pts.min(axis=0), pts.max(axis=0)
                 o.area = float(np.prod(maximum - minimum) / (w * h))
                 o.cx, o.cy = float((minimum[0] + maximum[0]) / (2*w)), float((minimum[1] + maximum[1]) / (2*h))
-                angles = head_pose(pts, w, h)
+                angles = head_pose(pts, w, h, o.diagnostics)
                 if angles is not None:
                     o.pitch, o.yaw, o.roll = angles
-                o.left, o.left_q = eye_measure(pts, LEFT, gray)
-                o.right, o.right_q = eye_measure(pts, RIGHT, gray)
+                for side, ids in (("left", LEFT), ("right", RIGHT)):
+                    diagnostic = {}
+                    value, quality = eye_measure(pts, ids, gray, diagnostic)
+                    setattr(o, side, value)
+                    setattr(o, side + "_q", quality)
+                    o.diagnostics.update({side + "_" + k: v for k, v in diagnostic.items()})
                 for ids in (LEFT, RIGHT):
                     for i in ids:
                         cv2.circle(frame, tuple(pts[i].astype(int)), 2, (100, 230, 100), -1)

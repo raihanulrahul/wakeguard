@@ -16,8 +16,8 @@ from pathlib import Path
 from tkinter import ttk, messagebox, simpledialog
 
 from . import __version__
-from .alarms import ScreenBackend, dpi_awareness
-from .calibration import CalibrationSession, CalibrationError, STAGES
+from .alarms import ScreenBackend, dpi_awareness, monitors
+from .calibration import CalibrationSession, CalibrationError, STAGES, measurement_issue
 from .engine import Engine, MODES
 from .model import Observation, Profile, data_home, atomic_json, angle_delta
 from .phone import PhoneBackend
@@ -48,6 +48,9 @@ class App:
         self.cal_phase = ""
         self.cal_good = False
         self.speech_after = None
+        self.speech_role = ""
+        self.eyes_lowered_possible = False
+        self.capture_guidance_sent = False
         self.voice_muted_until = 0.0
         self.verify_index = 0
         self.verify_samples = []
@@ -79,7 +82,8 @@ class App:
             self.poll_job = self.root.after(80, self._poll)
 
     def _settings(self):
-        defaults = {"camera": 0, "backend": "auto", "slow_pulse": False, "voice": False}
+        defaults = {"camera": 0, "backend": "auto", "slow_pulse": False, "voice": False,
+                    "monitor_count": min(3, max(1, len(monitors(self.root))))}
         try:
             data = json.loads(self.settings_path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
@@ -128,6 +132,11 @@ class App:
         ttk.Button(controls, text="Test speech", command=self.test_speech).pack(side="left")
         self.voice_enabled = tk.BooleanVar(value=bool(self.settings["voice"]))
         ttk.Checkbutton(controls, text="Optional voice", variable=self.voice_enabled).pack(side="left", padx=4)
+        row = ttk.Frame(outer); row.pack(fill="x", pady=4)
+        self.monitor_count_var = tk.StringVar(value=str(self.settings["monitor_count"]))
+        ttk.Label(row, text="Screens used for work").pack(side="left")
+        ttk.Combobox(row, textvariable=self.monitor_count_var, values=["1", "2", "3"], state="readonly", width=3).pack(side="left", padx=5)
+        ttk.Label(row, text="Step 2 checks each screen separately.").pack(side="left")
         row = ttk.Frame(outer); row.pack(fill="x", pady=4)
         ttk.Button(row, text="Calibrate", command=self.begin_calibration).pack(side="left")
         ttk.Button(row, text="Verify setup", command=self.begin_verification).pack(side="left", padx=4)
@@ -237,30 +246,132 @@ class App:
             self.acknowledge(); return True
         if action == "esc" and self.state in ("CALIBRATING", "VERIFYING"):
             self.stop_all(); return True
-        if self.state == "CALIBRATING":
-            if self.cal_phase == "READY" and action == "space":
-                self.cal_phase = "PROMPT"
-                self.status.set(f"STEP {self.cal.index + 1}/{len(STAGES)} · COUNTDOWN")
-                self._say("Prepare the requested posture. Three, two, one. Begin.", self._capture_begin)
-            elif self.cal_phase == "REVIEW" and action == "space" and self.cal_good:
-                if self.cal.advance():
-                    self._prompt_stage()
-                else:
-                    self._finish_calibration()
-            elif self.cal_phase in ("REVIEW", "READY") and action == "r":
-                self._prompt_stage()
-            elif self.cal_phase in ("REVIEW", "READY") and action == "b":
-                self.cal.repeat_previous(); self._prompt_stage()
-            else:
-                return False
+        if self.state not in ("CALIBRATING", "VERIFYING"):
+            return False
+        if action in ("r", "b"):
+            self._navigate_setup(action)
             return True
-        if self.state == "VERIFYING" and action == "space" and self.cal_phase == "READY":
-            self.verify_samples = []
-            self.verify_started = time.monotonic()
-            self.verify_last_seq = None
-            self.cal_phase = "CAPTURE"
+        if action != "space":
+            return False
+        # The brief reopen-eyes cue cannot be bypassed into another exposure.
+        if self.speech_role == "recovery" and self.speech.busy:
+            return True
+        if self.cal_phase == "READY" or (self.cal_phase == "PROMPT" and self.speech_role == "instruction"):
+            self._start_countdown()
+            return True
+        if self.state == "CALIBRATING" and (self.cal_phase == "REVIEW" or self.speech_role == "review"):
+            self._cancel_speech()
+            self.cal_phase = "REVIEW"
+            if not self.cal_good:
+                self._review_ready()
+                return True  # Cannot accept a failed or interrupted sample.
+            if self.cal.advance():
+                self._prompt_stage()
+            else:
+                self._finish_calibration()
             return True
         return False
+
+    def _cancel_speech(self):
+        self.speech_after = None
+        self.speech_role = ""
+        self.speech.stop()
+
+    def _start_countdown(self):
+        if not self.audio_confirmed:
+            self._cancel_speech()
+            self.cal_phase = "AUDIO FAILED"
+            self.detail.set("Audio is not confirmed. Press Stop, Test speech, confirm it, then resume setup.")
+            return
+        self._cancel_speech()
+        self.cal_phase = "PROMPT"
+        label = self.cal.label if self.state == "CALIBRATING" else f"Verify {self.verify_index + 1}"
+        self.status.set(label + " · COUNTDOWN")
+        if self.state == "CALIBRATING" and self.cal.stage.eyes in ("half", "closed"):
+            self.eyes_lowered_possible = True
+        callback = self._capture_begin if self.state == "CALIBRATING" else self._verify_capture_begin
+        # Long instructions are skippable; this short state label is not.
+        # It still tells a blind/half-eye user what to do after a repeat/back.
+        if self.state == "CALIBRATING":
+            eyes = self.cal.stage.eyes
+            cue = {"open": "Keep eyes normally open. ", "half": "Half-close your eyes after Begin. ",
+                   "closed": "Close your eyes after Begin. ", "absent": "Leave the chair after Begin. "}[eyes]
+        else:
+            cue = "Keep eyes normally open. "
+        self._say(cue + "Three, two, one. Begin.", callback, role="countdown")
+
+    def _verify_capture_begin(self):
+        if self.state != "VERIFYING" or self.cal_phase != "PROMPT":
+            return
+        self.verify_samples = []
+        self.verify_started = time.monotonic()
+        self.verify_last_seq = None
+        self.cal_phase = "CAPTURE"
+
+    def _navigate_setup(self, action):
+        lowered = self.eyes_lowered_possible or (self.state == "CALIBRATING" and self.cal is not None
+                   and self.cal.stage.eyes in ("half", "closed")
+                   and (self.cal_phase == "CAPTURE" or self.speech_role in ("countdown", "recovery")))
+        was_capturing = self.cal_phase == "CAPTURE"
+        self._cancel_speech()
+        if self.state == "CALIBRATING":
+            if self.cal is None:
+                return
+            if was_capturing:
+                self.log(self.cal.label + ": incomplete capture discarded.", "CALIBRATION_INTERRUPTED")
+            self.cal.cancel_capture()
+            if action == "b":
+                self.cal.repeat_previous()
+            prepare = lambda: self._prompt_stage(brief=True)
+        else:
+            self.verify_samples = []
+            if action == "b":
+                self.verify_index = max(0, self.verify_index - 1)
+            prepare = lambda: self._verify_prompt(brief=True)
+        self.cal_phase = "PROMPT"
+        if lowered:
+            self._recover_eyes(prepare)
+        else:
+            prepare()
+
+    def _recover_eyes(self, callback):
+        self.eyes_lowered_possible = True
+        def recovered():
+            self.eyes_lowered_possible = False
+            callback()
+        self._say("Open your eyes.", recovered, role="recovery")
+
+    def _handle_voice_event(self, event):
+        if event.get("event") == "voice_error":
+            self.log(event.get("message", "Voice unavailable; use keyboard."))
+            return
+        if event.get("event") != "command" or self.state not in ("CALIBRATING", "VERIFYING"):
+            return
+        text = event.get("text", "").lower()
+        mapping = {"wakeguard ready": "space", "wakeguard next": "space", "wakeguard repeat": "r",
+                   "wakeguard back": "b", "wakeguard stop": "stop"}
+        action = mapping.get(text)
+        if not action:
+            return
+        if action != "stop":
+            if self._dialog_depth:
+                return
+            try:
+                focused = self.root.focus_get()
+                if focused is not None and focused.winfo_toplevel() != self.root:
+                    return  # Do not navigate setup behind a stage selector or account dialog.
+            except (tk.TclError, KeyError):
+                return
+            at = event.get("at_utc")
+            if at is not None and (not isinstance(at, (float, int)) or not 0 <= time.time() - at <= 2):
+                return
+            if text == "wakeguard next" and not (self.cal_phase == "REVIEW" or self.speech_role == "review"):
+                return
+            if text == "wakeguard ready" and not (self.cal_phase == "READY" or self.speech_role == "instruction"):
+                return
+        # No blanket mute during speech: the prefixed command is an interrupt.
+        # TTS instructions intentionally never speak any of these command phrases.
+        self.action(action)
 
     def log(self, message, event="INFO", decision=None):
         text = f"{datetime.now().strftime('%H:%M:%S')}  {message}"
@@ -318,15 +429,19 @@ class App:
             self.stop_all()
             self.detail.set(f"Preview failed: {exc}")
 
-    def _say(self, message, callback=None):
+    def _say(self, message, callback=None, role="notice"):
         self.speech_after = callback
+        self.speech_role = role
         try:
             self.speech.say(message)
         except Exception:
             self.speech_after = None
             self.audio_confirmed = False
             self.cal_phase = "AUDIO FAILED"
+            self.speech_role = ""
             self.speech.stop()
+            if self.cal:
+                self.cal.recording = False
             self.detail.set("Speech unavailable. Setup capture has stopped. Check Windows playback device, then Test speech.")
 
     def test_speech(self):
@@ -360,7 +475,14 @@ class App:
         if self.closing or self.state != prior_state or self.latest is None:
             return  # Stop/Quit may have been requested inside the dialog's event loop.
         self.state, self.verified = "CALIBRATING", False
-        self.cal = CalibrationSession()
+        try:
+            count = int(self.monitor_count_var.get())
+            self.cal = CalibrationSession(monitor_count=count)
+        except (ValueError, TypeError) as exc:
+            self.state = "PREVIEW"
+            self.detail.set(str(exc)); return
+        self.settings["monitor_count"] = count
+        atomic_json(self.settings_path, self.settings)
         if self.voice_enabled.get():
             self._start_voice()
         self.root.focus_set()
@@ -375,7 +497,9 @@ class App:
         except Exception:
             self.log("Offline voice could not start. Use the keyboard fallback.")
 
-    def _prompt_stage(self):
+    def _prompt_stage(self, brief=False):
+        if self.state != "CALIBRATING" or self.cal is None:
+            return
         self.cal.recording = False
         self.cal_good = False
         self.cal_phase = "PROMPT"
@@ -384,58 +508,75 @@ class App:
         eye_notice = "Keep your eyes OPEN until you hear Begin. " if stage.eyes in ("closed", "half") else ""
         text = f"Step {self.cal.index + 1} of {len(STAGES)}. {eye_notice}{stage.instruction} Press space when ready."
         self.cal_text.set(text)
-        self.status.set(f"STEP {self.cal.index + 1}/{len(STAGES)} · INSTRUCTION")
-        self.detail.set("Prepare first. Collection starts ONLY after ready and countdown. R repeats; B goes back.")
-        self._say(text, lambda: self._ready("CALIBRATING"))
+        self.status.set(self.cal.label + " · INSTRUCTION")
+        self.detail.set("SPACE skips this instruction and starts the countdown. R retries; B goes back, including during speech.")
+        spoken = (self.cal.label.replace("·", ",") + ". Ready when you are. Press space.") if brief else text
+        self._say(spoken, lambda: self._ready("CALIBRATING"), role="instruction")
 
     def _ready(self, state):
         if self.state == state:
             self.cal_phase = "READY"
             self._input_epoch = time.monotonic()
-            step = self.cal.index + 1 if self.cal is not None and state == "CALIBRATING" else self.verify_index + 1
-            self.status.set(f"STEP {step} · READY — press SPACE")
+            label = self.cal.label if self.cal is not None and state == "CALIBRATING" else f"Verify {self.verify_index + 1}"
+            self.status.set(label + " · READY — press SPACE")
 
     def _capture_begin(self):
         if self.state != "CALIBRATING" or self.cal is None or self.cal_phase != "PROMPT":
             return
         self.cal.begin(time.monotonic())
+        self.capture_guidance_sent = False
         self.cal_phase = "CAPTURE"
         self._input_epoch = time.monotonic()
-        self.log(f"Step {self.cal.index + 1}/{len(STAGES)}: capturing {self.cal.stage.key}.", "CALIBRATION_CAPTURE")
+        self.log(f"{self.cal.label}: capturing {self.cal.stage.key}.", "CALIBRATION_CAPTURE")
 
     def _capture_done(self):
+        stage = self.cal.stage
         try:
             self.cal.finish()
             self.cal_good = True
             result = "Sample complete. Press space to accept and continue, or R to repeat."
-            self.log(f"Step {self.cal.index + 1}/{len(STAGES)} accepted for review: "
-                     f"{len(self.cal.current)} usable frames, {self.cal.valid_seconds:.1f}s. SPACE advances.", "CALIBRATION_SAMPLE")
+            self.log(f"{self.cal.label} accepted for review: {self.cal.quality_summary()}. SPACE advances.", "CALIBRATION_SAMPLE")
         except CalibrationError as exc:
             self.cal_good = False
-            result = str(exc) + ". Press R to repeat, B to go back, or Escape to stop."
-            self.log(f"Step {self.cal.index + 1}/{len(STAGES)} needs a repeat: {exc}", "CALIBRATION_RETRY")
+            self.log(f"{self.cal.label} needs a repeat: {exc}", "CALIBRATION_RETRY")
+            blocker = self.cal.final_issue or (self.cal.rejected.most_common(1)[0][0] if self.cal.rejected else
+                       "not enough usable recording time")
+            result = "Sample needs a repeat: " + blocker + ". Press R to repeat, B to go back, or Escape to stop."
+            self.detail.set(str(exc))
         self.cal_phase = "PROMPT"
         self.cal_text.set(result)
-        self._say("Open your eyes. " + result, lambda: self._review_ready())
+        def review():
+            if self.state == "CALIBRATING" and self.cal is not None:
+                self._say(result, self._review_ready, role="review")
+        if stage.eyes in ("half", "closed"):
+            # Separate a short safety cue from the skippable review narration.
+            self._recover_eyes(review)
+        else:
+            prefix = stage.completion_cue + " " if stage.eyes == "absent" else ""
+            self._say(prefix + result, self._review_ready, role="review")
 
     def _review_ready(self):
-        if self.state == "CALIBRATING":
+        if self.state == "CALIBRATING" and self.cal is not None:
             self.cal_phase = "REVIEW"
             self._input_epoch = time.monotonic()
             suffix = "SAMPLE OK — SPACE: next" if self.cal_good else "REPEAT NEEDED — press R"
-            self.status.set(f"STEP {self.cal.index + 1} · {suffix}")
+            self.status.set(self.cal.label + " · " + suffix)
 
     def choose_stage(self):
-        if self.state != "CALIBRATING" or self.cal_phase not in ("READY", "REVIEW"):
+        if self.state != "CALIBRATING" or self.cal is None:
             return
+        self._navigate_setup("r")
         dialog = tk.Toplevel(self.root); dialog.title("Repeat a calibration stage"); dialog.attributes("-topmost", True)
         selected = tk.StringVar(value=STAGES[self.cal.index].key)
         ttk.Combobox(dialog, textvariable=selected, values=[s.key for s in STAGES], state="readonly", width=30).pack(padx=15, pady=15)
         def go():
             if self.state != "CALIBRATING" or self.cal is None:
                 dialog.destroy(); return
-            self.cal.index = [s.key for s in STAGES].index(selected.get())
-            dialog.destroy(); self.root.focus_set(); self._prompt_stage()
+            if self.speech_role == "recovery" and self.speech.busy:
+                return
+            self._cancel_speech()
+            self.cal.select_stage([s.key for s in STAGES].index(selected.get()))
+            dialog.destroy(); self.root.focus_set(); self._prompt_stage(brief=True)
         ttk.Button(dialog, text="Repeat selected stage", command=go).pack(pady=10)
 
     def _finish_calibration(self):
@@ -450,7 +591,7 @@ class App:
             self.state = "PREVIEW"
             self.cal_phase = ""
             self.detail.set("Calibration passed. Press Verify setup for a short independent posture check before Start.")
-            self._say("Calibration passed. Keep your eyes open. Next, verify the setup before monitoring.")
+            self._say("Calibration passed. Next, verify the setup before monitoring.")
             self.log("Calibration accepted and saved; prior valid baseline retained as a backup.", "CALIBRATION")
             if not profile.report.get("auto_away_enabled"):
                 self.log("Automatic AWAY could not be distinguished. Use Leaving seat, or recalibrate camera placement.")
@@ -481,15 +622,20 @@ class App:
         self.state = "VERIFYING"
         self.verify_index = 0
         self.verified = False
+        if self.voice_enabled.get():
+            self._start_voice()
         self._verify_prompt()
 
-    def _verify_prompt(self):
+    def _verify_prompt(self, brief=False):
+        if self.state != "VERIFYING":
+            return
         self.cal_phase = "PROMPT"
         self._input_epoch = time.monotonic()
         text = self.VERIFY[self.verify_index][2]
         self.cal_text.set(text)
         self.status.set(f"VERIFY {self.verify_index + 1}/{len(self.VERIFY)} · INSTRUCTION")
-        self._say(text, lambda: self._ready("VERIFYING"))
+        spoken = f"Verify {self.verify_index + 1}. {self.VERIFY[self.verify_index][0]}. Press space when ready." if brief else text
+        self._say(spoken, lambda: self._ready("VERIFYING"), role="instruction")
 
     def _verify_finish(self):
         name = self.VERIFY[self.verify_index][0]
@@ -517,7 +663,7 @@ class App:
             self.cal_phase = ""
             self.state = "PREVIEW"
             self.detail.set(f"Verification failed: {name}. Check camera angle/lighting and recalibrate or retry. Start remains blocked.")
-            self._say("Setup verification failed. Keep your eyes open. Check the camera or repeat calibration.")
+            self._say("Setup verification failed. Check the camera or repeat calibration.")
             self.log(f"Verification rejected: {name} ({good}/{len(samples)} usable matches).", "VERIFY_REJECTED")
             return
         self.verify_index += 1
@@ -645,6 +791,8 @@ class App:
         self.cal_phase = ""
         self.cal = None
         self.speech_after = None
+        self.speech_role = ""
+        self.eyes_lowered_possible = False
         self.verified = False
         self.engine = None
         self.latest = self.last_decision = None
@@ -660,6 +808,7 @@ class App:
         self.battery.set(0)
         self.preview_label.configure(image="", text="Stopped. Camera, microphone and phone worker released.")
         self.preview_photo = None
+        self.cal_text.set("Setup stopped. Use Preview before beginning calibration or verification again.")
         self.detail.set("All owned workers and screen alerts stopped. A Find My sound already sent must be dismissed on the phone.")
         self.log("All owned services stopped." + (" Cleanup errors: " + ", ".join(errors) if errors else ""), "STOP")
 
@@ -741,14 +890,10 @@ class App:
                         self.cal_phase = "AUDIO FAILED"
                         if self.cal:
                             self.cal.recording = False
-                    self.detail.set("Speech failed. Open your eyes. Stop setup and check audio before trying again.")
+                    cue = "Open your eyes. " if self.eyes_lowered_possible else ""
+                    self.detail.set("Speech failed. " + cue + "Stop setup and check audio before trying again.")
             for event in self.voice.drain():
-                if event.get("event") == "voice_error":
-                    self.log(event.get("message", "Voice unavailable; use keyboard."))
-                if event.get("event") == "command" and self.state == "CALIBRATING":
-                    action = {"wakeguard ready": "space", "wakeguard next": "space", "wakeguard repeat": "r", "wakeguard back": "b", "wakeguard stop": "stop"}.get(event.get("text"))
-                    if action and (action == "stop" or (not self.speech.busy and now >= self.voice_muted_until)):
-                        self.action(action)
+                self._handle_voice_event(event)
             for _ in range(50):
                 if self.inputs.events.empty():
                     break
@@ -761,10 +906,21 @@ class App:
             self.screen.pulse = self.pulse.get()
             o = self.latest
             if self.state == "CALIBRATING" and self.cal_phase == "CAPTURE":
-                self.status.set(f"STEP {self.cal.index + 1}/{len(STAGES)} · CAPTURE {max(0, self.cal.stage.seconds-(now-self.cal.started)):.1f}s")
+                elapsed = now - self.cal.started
+                self.status.set(self.cal.label + f" · CAPTURE {elapsed:.1f}s")
+                self.cal_text.set(self.cal.progress(now))
                 if self.cal.due(now):
                     self._capture_done()
+                elif elapsed >= self.cal.stage.seconds and not self.capture_guidance_sent:
+                    self.capture_guidance_sent = True
+                    hint = ("Waiting for an empty chair. Move fully out of camera view."
+                            if self.cal.stage.eyes == "absent" else
+                            "Still collecting usable measurements. Hold this one position. "
+                            "The camera needs a clear view of your face and eyes.")
+                    self._say(hint, role="capture_hint")
             if self.state == "VERIFYING" and self.cal_phase == "CAPTURE":
+                remaining = max(0.0, self.VERIFY[self.verify_index][1] - (now - self.verify_started))
+                self.status.set(f"VERIFY {self.verify_index + 1}/{len(self.VERIFY)} · CAPTURE {remaining:.1f}s")
                 if now - self.verify_started >= self.VERIFY[self.verify_index][1]:
                     self._verify_finish()
             if self.state == "MONITORING":
@@ -805,6 +961,9 @@ class App:
                 self.metrics.set(f"Eye openness {self.fmt(min(eyes) if eyes else None)} · neck down {self.fmt(self.profile.neck(o))} · recline {self.fmt(self.profile.recline(o))}\nPitch {self.fmt(o.pitch)}  yaw {self.fmt(o.yaw)}  roll {self.fmt(o.roll)} · face {o.face} / body {o.body}")
             elif o:
                 self.metrics.set(f"Left eye {self.fmt(o.left)} (quality {o.left_q:.2f}) · right {self.fmt(o.right)} (quality {o.right_q:.2f})\nPitch {self.fmt(o.pitch)} · yaw {self.fmt(o.yaw)} · roll {self.fmt(o.roll)} · face {o.face} / body {o.body}")
+            if o and self.state == "PREVIEW":
+                issue = measurement_issue(o, now, STAGES[0])
+                self.metrics.set(self.metrics.get() + "\nSetup visibility: " + (issue or "face, pose and at least one eye measurable"))
         except Exception as exc:
             self._callback_error(type(exc), exc, None)
         if not self.closing:

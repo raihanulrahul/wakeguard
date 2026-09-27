@@ -23,7 +23,7 @@ try {
         if ($null -ne $event) {
             $result = $event.SourceEventArgs.Result
             if ($result.Confidence -ge 0.75) {
-                $payload = @{event='command'; text=$result.Text.ToLowerInvariant().Replace('wake guard ', 'wakeguard ')} | ConvertTo-Json -Compress
+                $payload = @{event='command'; text=$result.Text.ToLowerInvariant().Replace('wake guard ', 'wakeguard '); at_utc=([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0)} | ConvertTo-Json -Compress
                 [Console]::WriteLine($payload)
             }
             Remove-Event -EventIdentifier $event.EventIdentifier

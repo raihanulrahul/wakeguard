@@ -1,7 +1,8 @@
 """Guided calibration: labelled samples, quality gates, immutable profiles."""
 from __future__ import annotations
 import math
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from .model import Observation, Profile, SCHEMA, angle_delta, finite, median, robust_spread, scene_distance
 
@@ -14,10 +15,23 @@ class Stage:
     eyes: str = "open"
     allow_blind: bool = False
 
+    @property
+    def time_limit(self) -> float:
+        # Never extend an eye-closed/half-closed exposure to chase good frames.
+        return self.seconds if self.eyes in ("closed", "half") else min(36.0, self.seconds * 3)
+
+    @property
+    def completion_cue(self) -> str:
+        if self.eyes in ("closed", "half"):
+            return "Open your eyes."
+        if self.eyes == "absent":
+            return "You may return to your chair."
+        return "Capture complete."
+
 
 STAGES = (
     Stage("main", 10, "Sit upright in your normal working position. Look at your main work monitor, NOT the camera."),
-    Stage("monitors", 12, "Read and look between your usual monitors. Keep eyes normally open and move naturally."),
+    Stage("monitors", 8, "Read normally on this ONE screen. Keep your usual working posture and eyes open. Do not sweep between screens during capture."),
     Stage("left", 8, "Turn your body slightly left as you might while working. Keep eyes open."),
     Stage("right", 8, "Turn your body slightly right as you might while working. Keep eyes open."),
     Stage("reading", 8, "Look a little down as when reading a document. Stay in an ordinary awake posture."),
@@ -65,72 +79,223 @@ def view_clusters(samples: list[Observation]) -> list[dict]:
     return [v for v in views if finite(v.get("left")) or finite(v.get("right"))]
 
 
+def measurement_issue(o: Observation, now: float, stage: Stage) -> str:
+    """First blocking quality gate; no images or raw video are logged."""
+    if not o.camera_ok:
+        return "camera read failed or frozen"
+    if not 0 <= now - o.t <= .7:
+        return "camera measurements arriving too late"
+    if stage.eyes == "absent":
+        if o.face or o.body is not False:
+            return "a person is still detected in the empty-chair sample"
+        return "" if o.scene else "empty-scene measurement unavailable"
+    if not o.face:
+        return "face not detected at this position"
+    if not o.pose_valid():
+        reason = o.diagnostics.get("pose_reason", "")
+        return "head pose unavailable" + (": " + reason if reason else "")
+    if not stage.allow_blind and not (o.valid_eye("left") or o.valid_eye("right")):
+        details = []
+        for side in ("left", "right"):
+            reason = o.diagnostics.get(side + "_reason", "")
+            if reason:
+                details.append(side + " " + reason)
+        return "eyes not measurable" + (": " + "; ".join(details) if details else "")
+    return ""
+
+
 class CalibrationSession:
-    """UI owns prompts; this object accepts data only while RECORDING."""
-    def __init__(self) -> None:
+    """Labelled capture with bounded recovery time and per-screen coverage."""
+    def __init__(self, monitor_count: int = 1) -> None:
+        if isinstance(monitor_count, bool) or monitor_count not in (1, 2, 3):
+            raise ValueError("Screens used must be 1, 2 or 3")
         self.index = 0
+        self.monitor_count = monitor_count
+        self.monitor_index = 0
+        self.monitor_samples: dict[int, list[Observation]] = {}
         self.samples: dict[str, list[Observation]] = {}
+        self.capture_reports: dict[str, dict] = {}
         self.current: list[Observation] = []
         self.started: float | None = None
         self.last_t: float | None = None
         self.last_seq: int | None = None
+        self.last_good = False
         self.valid_seconds = 0.0
         self.total_frames = 0
+        self.rejected: Counter = Counter()
+        self.blocker_examples: dict[str, str] = {}
+        self.latest_issue = ""
+        self.final_issue = ""
         self.recording = False
 
     @property
     def stage(self) -> Stage:
-        return STAGES[self.index]
+        base = STAGES[self.index]
+        if base.key == "monitors":
+            name = ("MAIN work screen", "SECOND work screen", "THIRD work screen")[self.monitor_index]
+            return replace(base, instruction=f"Screen {self.monitor_index + 1} of {self.monitor_count}. "
+                           f"Look at your {name}. " + base.instruction)
+        return base
+
+    @property
+    def label(self) -> str:
+        label = f"Step {self.index + 1}/{len(STAGES)}"
+        if self.stage.key == "monitors":
+            label += f" · screen {self.monitor_index + 1}/{self.monitor_count}"
+        return label
+
+    @property
+    def required_seconds(self) -> float:
+        return self.stage.seconds * .65
+
+    @property
+    def required_frames(self) -> int:
+        return max(8, int(self.stage.seconds * 4))
+
+    @property
+    def quality_met(self) -> bool:
+        return (len(self.current) >= self.required_frames
+                and self.valid_seconds + 1e-7 >= self.required_seconds
+                and len(self.current) >= self.total_frames * .65)
 
     def begin(self, now: float) -> None:
         self.current = []
         self.started = now
         self.last_t = None
         self.last_seq = None
+        self.last_good = False
         self.valid_seconds = 0
         self.total_frames = 0
+        self.rejected.clear()
+        self.blocker_examples.clear()
+        self.latest_issue = ""
+        self.final_issue = ""
         self.recording = True
 
+    def cancel_capture(self) -> None:
+        # Keep previously accepted stages/views; throw away the unfinished take.
+        self.recording = False
+        self.current = []
+        self.started = None
+        self.last_t = None
+        self.last_seq = None
+        self.last_good = False
+        self.valid_seconds = 0.0
+        self.total_frames = 0
+        self.rejected.clear()
+        self.blocker_examples.clear()
+        self.latest_issue = ""
+        self.final_issue = ""
+
     def add(self, o: Observation, now: float) -> None:
-        if not self.recording or o.seq == self.last_seq or not 0 <= now - o.t <= .7:
+        if not self.recording or o.seq == self.last_seq:
             return
         self.last_seq = o.seq
-        dt = min(.25, max(0.0, o.t - self.last_t)) if self.last_t is not None else 0.0
-        self.last_t = o.t
+        # Buffered frames belonging to the spoken countdown must not count.
+        if self.started is not None and not self.started <= o.t <= self.started + self.stage.time_limit:
+            return
         self.total_frames += 1
-        if self.stage.eyes == "absent":
-            good = o.camera_ok and not o.face and o.body is False and bool(o.scene)
-        else:
-            good = o.pose_valid() and (self.stage.allow_blind or o.valid_eye("left") or o.valid_eye("right"))
+        issue = measurement_issue(o, now, self.stage)
+        gap = o.t - self.last_t if self.last_t is not None else 0.0
+        if self.last_t is not None and gap <= 0:
+            issue = "camera timestamps not advancing"
+        good = not issue
+        # Never credit an interval spanning rejected/missing frames as good time.
+        if good and self.last_good and 0 < gap <= .35:
+            self.valid_seconds += min(.25, gap)
+        self.last_t, self.last_good = o.t, good
+        self.latest_issue = issue
         if good:
             self.current.append(o)
-            self.valid_seconds += dt
+        else:
+            category = issue.partition(":")[0]
+            self.rejected[category] += 1
+            self.blocker_examples[category] = issue
 
     def due(self, now: float) -> bool:
-        return self.recording and self.started is not None and now - self.started >= self.stage.seconds
+        if not self.recording or self.started is None:
+            return False
+        elapsed = now - self.started
+        if elapsed >= self.stage.time_limit:
+            if self.last_t is None or not 0 <= now - self.last_t <= .7:
+                self.final_issue = "no fresh camera measurements at the capture deadline"
+            elif not self.last_good:
+                self.final_issue = self.latest_issue or "measurements not usable at the capture deadline"
+            return True
+        fresh = self.last_t is not None and 0 <= now - self.last_t <= .7
+        return elapsed >= self.stage.seconds and self.quality_met and self.last_good and fresh
+
+    def quality_summary(self) -> str:
+        fraction = len(self.current) / self.total_frames if self.total_frames else 0
+        text = (f"{len(self.current)}/{self.total_frames} usable frames ({fraction:.0%}); "
+                f"{self.valid_seconds:.1f}/{self.required_seconds:.1f}s usable; "
+                f"minimum {self.required_frames} frames and 65% coverage")
+        if self.rejected:
+            text += ". Rejected: " + "; ".join(f"{self.blocker_examples.get(reason, reason)} ({n})" for reason, n in self.rejected.most_common(3))
+        return text
+
+    def progress(self, now: float) -> str:
+        elapsed = max(0.0, now - self.started) if self.started is not None else 0
+        if self.last_t is None:
+            reason = "waiting for camera measurements"
+        elif not 0 <= now - self.last_t <= .7:
+            reason = "camera measurements arriving too late"
+        else:
+            reason = self.latest_issue or "measurement usable now"
+        return (f"Usable {self.valid_seconds:.1f}/{self.required_seconds:.1f}s, "
+                f"{len(self.current)}/{self.required_frames} frames. {reason}. "
+                f"Time limit {max(0, self.stage.time_limit - elapsed):.0f}s. R retries; B goes back.")
 
     def finish(self) -> None:
         self.recording = False
-        required = max(8, int(self.stage.seconds * 4))
-        if (len(self.current) < required or self.valid_seconds < self.stage.seconds * .65
-                or len(self.current) < self.total_frames * .65):
-            raise CalibrationError(f"{self.stage.key}: only {len(self.current)} usable frames / {self.valid_seconds:.1f}s. Adjust camera or lighting and repeat this stage.")
-        self.samples[self.stage.key] = list(self.current)
+        if self.final_issue:
+            raise CalibrationError(f"{self.label} ({self.stage.key}): {self.final_issue}. " + self.quality_summary())
+        if not self.quality_met:
+            raise CalibrationError(f"{self.label} ({self.stage.key}): {self.quality_summary()}. "
+                                   "Hold only the requested screen position. If you reposition the camera, restart the full calibration.")
+        if self.stage.key == "monitors":
+            self.monitor_samples[self.monitor_index] = list(self.current)
+            self.samples["monitors"] = [o for i in sorted(self.monitor_samples) for o in self.monitor_samples[i]]
+            key = f"monitors_{self.monitor_index + 1}"
+        else:
+            self.samples[self.stage.key] = list(self.current)
+            key = self.stage.key
+        self.capture_reports[key] = {"usable_frames": len(self.current), "total_frames": self.total_frames,
+                                     "usable_seconds": self.valid_seconds, "rejected": dict(self.rejected)}
 
     def advance(self) -> bool:
+        if self.stage.key == "monitors" and self.monitor_index + 1 < self.monitor_count:
+            self.monitor_index += 1
+            return True
         if self.index + 1 >= len(STAGES):
             return False
         self.index += 1
+        if STAGES[self.index].key == "monitors":
+            self.monitor_index = 0
         return True
 
     def repeat_previous(self) -> None:
-        self.index = max(0, self.index - 1)
+        if self.stage.key == "monitors" and self.monitor_index > 0:
+            self.monitor_index -= 1
+        else:
+            self.index = max(0, self.index - 1)
+            if self.stage.key == "monitors":
+                self.monitor_index = self.monitor_count - 1
         self.recording = False
+
+    def select_stage(self, index: int) -> None:
+        if not 0 <= index < len(STAGES):
+            raise ValueError("Unknown calibration stage")
+        self.cancel_capture()
+        self.index = index
+        self.monitor_index = 0
 
     def build(self) -> Profile:
         missing = [s.key for s in STAGES if s.key not in self.samples]
         if missing:
             raise CalibrationError("Missing stages: " + ", ".join(missing))
+        if self.monitor_count > 1 and set(self.monitor_samples) != set(range(self.monitor_count)):
+            raise CalibrationError("Each selected screen needs its own accepted sample; repeat the monitors stage")
         reports = {k: summarize(v) for k, v in self.samples.items()}
         camera_keys = {o.camera_key for values in self.samples.values() for o in values}
         if len(camera_keys) != 1 or not next(iter(camera_keys)):
@@ -196,9 +361,20 @@ class CalibrationSession:
                   "auto_away_enabled": automatic_away, "recline_separation": separation, "half_thresholds": half_thresholds,
                   "neck_down_delta": down_delta, "neck_up_delta": up_delta,
                   "occupied_empty_separation": occupied_distance,
+                  "monitor_count": self.monitor_count, "capture_quality": self.capture_reports,
                   "notes": "Heuristic calibration; not a sleep diagnosis."}
         result = Profile(SCHEMA, next(iter(camera_keys)), datetime.now(timezone.utc).isoformat(), ov, cv,
                          neutral, reclined, reports["neck_down"], reports["neck_up"], signature,
                          tolerance, median([o.brightness for o in opens]), report)
         result.validate()
+        view_coverage = {}
+        for screen, values in sorted(self.monitor_samples.items()):
+            usable = sum(bool(result.eye_ratios(o)) for o in values)
+            fraction = usable / len(values) if values else 0.0
+            view_coverage[str(screen + 1)] = fraction
+            if fraction < .65:
+                raise CalibrationError(
+                    f"Work screen {screen + 1}: accepted images lack matching eye references at this angle. "
+                    "Recheck this screen and the labelled open/closed positions; do not ignore this view.")
+        result.report["monitor_reference_coverage"] = view_coverage
         return result

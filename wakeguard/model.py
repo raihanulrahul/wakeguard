@@ -55,6 +55,7 @@ class Observation:
     scene: list[float] = field(default_factory=list)
     camera_key: str = ""
     error: str = ""
+    diagnostics: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict) -> Observation:
@@ -69,6 +70,10 @@ class Observation:
                 setattr(result, name, 0.0)
         if not isinstance(result.scene, list) or not all(finite(x) for x in result.scene):
             result.scene = []
+        if not isinstance(result.diagnostics, dict):
+            result.diagnostics = {}
+        result.diagnostics = {str(k)[:40]: v for k, v in result.diagnostics.items()
+                              if isinstance(v, str) and len(v) <= 160 or finite(v)}
         return result
 
     def valid_eye(self, side: str) -> bool:

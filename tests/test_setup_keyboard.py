@@ -84,6 +84,8 @@ class SetupKeyboardTests(unittest.TestCase):
         self.app.cal.total_frames = len(sample)
         self.app._capture_done()
         self.pump()
+        if self.app.cal_phase == "PROMPT" and self.app.speech_role == "review":
+            self.pump()
         self.assertTrue(self.app.cal_good)
         self.assertEqual(self.app.cal_phase, "REVIEW")
 
