@@ -417,7 +417,7 @@ class App:
     def preview(self):
         if self.state == "MONITORING":
             messagebox.showinfo("WakeGuard", "Stop monitoring before changing camera setup.", parent=self.root); return
-        if self.state in ("CALIBRATING", "VERIFYING"):
+        if self.state in ("CALIBRATING", "VERIFYING", "GLASSES"):
             return
         try:
             self.camera.stop()
@@ -470,7 +470,7 @@ class App:
             self.detail.set("Open Preview and wait for live camera measurements first."); return
         prior_state = self.state
         if not self.testing and not self._ask_setup(messagebox.askokcancel,
-                "Calibration", "This is setup, not an alertness test. Remain safely seated; do not attempt it while unable to stay awake.\n\nOnly the labelled closed-eye captures last 3 seconds. Spoken prompts tell you when to open your eyes. SPACE confirms each step; R repeats; Esc stops everything.\n\nAllow calibration speech now?", parent=self.root):
+                "Calibration", "This is setup, not an alertness test. Remain safely seated; do not attempt it while unable to stay awake.\n\nOnly the labelled closed-eye captures last 3 seconds. Spoken prompts tell you when to open your eyes. Normal small head movement is expected; do not freeze yourself in place. If glasses support is enabled, keep glasses OFF for this base pass; the short glasses-on pass follows. SPACE confirms each step; R repeats; Esc stops everything.\n\nAllow calibration speech now?", parent=self.root):
             return
         if self.closing or self.state != prior_state or self.latest is None:
             return  # Stop/Quit may have been requested inside the dialog's event loop.
