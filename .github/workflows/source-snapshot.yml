@@ -1,7 +1,7 @@
 name: Source-only QA snapshot
 on:
   push:
-    branches: ['fix/calibration-capture-and-interrupts']
+    branches: ['fix/calibration-capture-and-interrupts', 'feature/office-desktop-030']
 permissions:
   contents: read
 jobs:

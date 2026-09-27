@@ -6,6 +6,7 @@ on:
       - 'Start-WakeGuard.cmd'
       - 'Update-WakeGuard.cmd'
       - 'wakeguard_launcher.pyw'
+      - 'scripts/smoke_windowless.py'
       - '.github/workflows/office-package.yml'
   workflow_dispatch:
 permissions:
@@ -34,7 +35,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          & .\Install-WakeGuard.ps1 -Destination "$env:RUNNER_TEMP\WakeGuard office desk" -SourceRef $env:GITHUB_SHA -ArchivePath "$env:RUNNER_TEMP\wg-source.zip" -NoLaunch -NoShortcut
+          & .\Install-WakeGuard.ps1 -Destination "$env:RUNNER_TEMP\WakeGuard office desk" -SourceRef $env:GITHUB_SHA -NoLaunch -NoShortcut
           if ($LASTEXITCODE -ne 0) { throw 'Office package install failed' }
       - name: Verify isolation, protected folders, running-instance lock, and repeat update
         shell: powershell
@@ -75,3 +76,15 @@ jobs:
           Set-Location $dest
           & .\.venv_wakeguard\Scripts\python.exe -c "from wakeguard.brightness_native import DdcDriver; d=DdcDriver(); print('Read-only DDC discovery:',len(d.discover())); d.close()"
           if ($LASTEXITCODE -ne 0) { throw 'Native API declaration/read-only discovery failed' }
+      - name: Launch actual pythonw entry and capture demo dashboard only
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dest = "$env:RUNNER_TEMP\WakeGuard office desk"
+          & "$dest\.venv_wakeguard\Scripts\python.exe" "$dest\scripts\smoke_windowless.py" $dest "$env:RUNNER_TEMP\wg-ui-windows"
+          if ($LASTEXITCODE -ne 0) { throw 'Windowless launcher smoke test failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wakeguard-desktop-ui-${{ github.sha }}
+          path: ${{ runner.temp }}/wg-ui-windows/*.png
+          retention-days: 3

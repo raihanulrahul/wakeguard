@@ -1,105 +1,86 @@
-# WakeGuard 0.2.2 — desktop testing build
+# WakeGuard 0.3 — guided desktop testing build
 
-A local Windows desk-alert assistant. Calibrated eyelid measurements, head/neck pose, recline geometry, occupancy evidence and elapsed time drive a visible concern meter and independent screen/iPhone Find My alert channels.
+A local Windows desk-alert assistant with personalized eyelid/head/recline calibration, a guided modern dashboard, independent full-screen/iPhone sound channels, and temporary maximum brightness on supported displays.
 
-**This is a testable prototype, not a validated sleep detector, medical device, or guarantee an alarm will wake someone. Do not use it to justify driving, machinery operation or working through dangerous sedation/sleepiness.** Cameras can miss events. Find My can be delayed/unavailable. A screen alone is not a reliable alert with eyes closed.
+**A testable prototype, not a validated sleep detector, medical device, or guarantee of awakening. Do not use it to justify driving, machinery operation or working through dangerous sleepiness. A screen alone may not wake someone with closed eyes.**
 
-## Upgrade an already installed copy
+## New PC: private installation, your choice of folder
 
-Quit WakeGuard first. Preserve/review local edits; never force-reset the repository.
+Run `Install-WakeGuard.ps1` in ordinary Windows PowerShell. It asks for a dedicated writable local folder, such as `E:\Apps\WakeGuard`, or accepts the per-user default. No Git or existing Python is required. Initial installation needs internet.
 
-```powershell
-cd D:\Codes\wakeguard
-git status
-# Continue only with a clean working tree:
-git pull --ff-only origin main
-.\Start-WakeGuard.cmd
-```
+The installer downloads an immutable source revision, runs `Setup-WakeGuard-Private.ps1`, creates application-only Python/package environments, adds a desktop shortcut, and opens WakeGuard. It does not request elevation, modify system Python/PATH/launcher/file associations, disable security software, or change permissions. Existing nonempty folders are protected. Corporate network, application-control, camera or script policies can still block operation; follow the approved IT route rather than bypassing them.
 
-**The 0.2.1 to 0.2.2 update is source-only: no setup script, pip command or Python installer is needed.** It adds per-screen calibration, diagnostic rejection reasons and interruptible setup speech. Read `docs/CALIBRATION_USABILITY_FIX.md` for the changes, actual Windows QA and hardware limitations.
-
-## First installation on another PC
-
-Clone the repository into its own folder, then run the private setup there:
+Example after downloading the installer file:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\Setup-WakeGuard-Private.ps1
-.\Start-WakeGuard.cmd
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-WakeGuard.ps1
 ```
 
-This supplies an app-private Python 3.12.10 x64 under `.runtime`, with `.venv_wakeguard` for vision/UI and `.venv_phone` for the incompatible phone stack. It does not request changes to existing system Python installations, PATH, launcher registrations or file associations. It checks relevant before/after values and refuses incompatible pre-existing application environments. No old environment is automatically deleted. See `docs/PRIVATE_SETUP.md` for exact scope and limitations.
+Installed folders: `.runtime` holds private Python; `.venv_wakeguard` vision/UI; `.venv_phone` the incompatible phone stack; `.bootstrap` tools/caches/recovery snapshots. Runtime settings, calibration, cookies and events remain in `%LOCALAPPDATA%\WakeGuard`. Keep the private runtime in place. Install separately on each PC instead of copying environments.
 
-Install separately on each PC; do not copy populated virtual environments. Initial package installation needs internet. Private setup performs dependency checks and regression tests but does not authenticate to Apple or open the actual camera. For future dependency changes use the private setup again, not the old generic setup alone. Ordinary launches require only double-clicking `Start-WakeGuard.cmd`; no activation, typed command or VS Code is needed. Keep its console minimized rather than closing it while the app runs.
+The bootstrap uses a pinned, SHA-256-verified portable uv helper with `--no-bin --no-registry --no-config` to obtain app-private CPython 3.12.10 x64. No global uv/Python installer is invoked. Dependencies are confined to application environments; pip redirection/configuration inherited from other projects is disabled only for the setup process. See `docs/PRIVATE_SETUP.md` and `docs/OFFICE_RELEASE_030.md`.
 
-`mvsa_app.py` is the compatibility entry. Actual modules are under `wakeguard/`. The old `mvsa_config.json` is not read. Settings, calibration and logs live in `%LOCALAPPDATA%\WakeGuard`, outside Git. Keep `.runtime` in place: the application environments depend on it.
+## Everyday launch and updates
 
-## First session
+Double-click the **WakeGuard desktop shortcut** or **Start-WakeGuard.cmd**. No terminal typing, activation, VS Code, or persistent command window is needed. The explicit app interpreter is used; duplicate UI launches are rejected without stopping the existing instance. Startup errors are displayed and logged locally.
 
-1. **Screens used for work.** Choose 1, 2 or 3. Count screens you actually look at while working. Main means your normal work monitor, not necessarily the Windows primary screen or the camera's screen.
-2. **Preview.** Select camera index/backend. Try `dshow` or `msmf` if `auto` fails. Check your normal main-monitor pose, other work screens, neck down and full recline. Setup visibility explains missing face/pose/eyes or delayed frames. Do not stare at the webcam unless that is natural. Keep other people's faces out of frame.
-3. **Test speech.** Confirm that instructions are audible using your Windows playback device. Speech is for setup only; monitoring does not play PC alarm audio. Optional voice uses an installed English Windows recognizer locally. Enable it before calibration; keyboard/buttons remain the fallback.
-4. **Calibrate.** There are 15 labelled stages. Step 2 checks each selected screen separately: read normally on just the named screen, not a continuous sweep. SPACE can interrupt a long instruction and go to the short state label/countdown. R/Repeat retries, B/Previous goes back, including during speech or capture. Only an unfinished take is discarded; accepted stages remain. Closed-eye captures last 3 seconds; half-eye captures 5 seconds; neither is extended. Eyes-open captures can wait a bounded extra interval for usable coverage. Capture finishes automatically and the result is shown/spoken. SPACE accepts a good sample; it cannot bypass a failed one. Keep eyes open until Begin.
-5. **Verify setup.** Separate checks cover normal main-monitor posture, neck down, full recline and return upright. R/B/SPACE also control its narration. This is not clinical validation.
-6. **Connect phone.** Enter credentials in the masked local dialog, complete 2FA, explicitly select the exact iPhone, send a sound test, and press **I heard the test** only after hearing it. A request-sent response alone does not arm the phone.
-7. Select **Normal / High Alert / Super Alert**, then **START**. Without a connected/tested phone, the app requires explicit permission for **screen-only test mode**.
+Packaged installation: close WakeGuard, then double-click `Update-WakeGuard.cmd`. It checks that managed source was not locally edited, backs up source, checks the running-instance lock, and reuses private environments. It never force-resets user edits or repurposes an unrelated folder.
 
-After Stop/relaunch, Preview and Verify are required again. Full saved calibration is reusable if valid. Restart full calibration after physically moving the camera, rather than mixing old and new geometry. Reconnect/test the phone after its worker was stopped. Find My has a 130-second minimum interval, including tests.
+Existing Git checkout (such as `D:\Codes\wakeguard`): close the app, inspect `git status`, preserve any edits, then `git pull --ff-only origin main` and launch `Start-WakeGuard.cmd`. This 0.2.2→0.3.0 update needs no dependency reinstall. **Do not run the package installer over a Git checkout.** For dependency updates in an existing checkout, use `Setup-WakeGuard-Private.ps1`, not a global pip command.
 
-## Controls and interruptible speech
+## Follow the next-step card
 
-| Control | Action |
-|---|---|
-| SPACE / Ready-Next button during instruction | Skip long narration and begin the short countdown |
-| SPACE during good-sample review | Accept and continue, without waiting for review narration |
-| R / Repeat | Interrupt current setup operation; retry with a short reminder |
-| B / Previous | Interrupt current setup operation; previous stage/screen |
-| SPACE / Esc / Ctrl+Shift+A during an alert | Acknowledge |
-| Ctrl+Alt+S / Stop Everything | Stop owned services |
-| Ctrl+Shift+Q | Quit immediately |
-| Choose stage | Repeat a specific labelled stage |
-| Leaving seat | Brief departure grace; resumes if still visible or upon return |
+The large **YOUR NEXT STEP** card guides the sequence. The sidebar separates Guided setup, Live view, Alert settings and Diagnostics. Stop, Quit and Acknowledge stay in the footer; technical logs are no longer mixed with every normal action.
 
-Keep the WakeGuard window selected for setup keyboard controls. Optional voice commands are **WakeGuard ready**, **WakeGuard next**, **WakeGuard repeat**, **WakeGuard back**, **WakeGuard stop**. Recognized commands can interrupt narration; physical recognition depends on your microphone/Windows recognizer. Next accepts review only, not an unfinished capture. SPACE cannot skip a recording, accept failed data, or bypass the brief reopen-eyes safety cue before another closed/half-eye take. Stop/Quit remain immediate.
+1. Start camera preview and select the correct camera/backend. Look at your normal work screen, not necessarily the webcam. Set Screens used for work to 1, 2 or 3.
+2. Test speech and confirm you heard it. Optional offline English voice commands can be enabled, but keyboard/buttons remain available.
+3. Calibrate, using labelled eye/posture samples. Step 2 has a separate take for each selected work screen. Read on the named screen during that take, not continuously between screens.
+4. Verify today's setup. Saved calibration can be reused only when current geometry passes.
+5. Test the screen alert and acknowledge it. Configure and test Find My, or explicitly choose **screen-only TEST mode**.
+6. Select Normal / High Alert / Super Alert in Live view and Start monitoring.
 
-Ordinary eyes-open stages say "Sample complete." Closed/half-eye stages first say "Open your eyes." The empty-chair stage says "You may return to your chair." No reading/clicking is needed while eyes are half closed. R/B during closed/half capture cancel the partial sample and cue reopening before continuing.
+The app does not silently start monitoring after installation or calibration. After Stop/relaunch, preview and setup verification are required. Phone connection/testing is needed after its worker stops. Work and home PCs require their own calibration and account session.
 
-Every alert has steady ACK, STOP EVERYTHING and QUIT buttons. One borderless window covers each monitor; text is on only one primary screen. Default is steady bright. Optional slow pulsing changes background once per second, not a rapid red/white strobe. Stop releases owned camera, speech, microphone and phone workers and removes overlays; it does not kill unrelated Python programs or VS Code. A Find My sound already accepted by Apple cannot be recalled; dismiss it on the phone.
+## Calibration controls
 
-## Detection and calibration safeguards
+- **Space / Ready-Next** skips long instructions but retains the short state label/countdown, or accepts a good completed sample.
+- **R / Repeat** and **B / Previous** interrupt narration/countdown/capture immediately and prepare the same/previous stage with a short reminder. Incomplete takes are discarded; accepted earlier samples remain.
+- Optional prefixed commands: “WakeGuard ready”, “WakeGuard next”, “WakeGuard repeat”, “WakeGuard back”, “WakeGuard stop”. Recognition during narration depends on the microphone/recognizer, not just software event routing.
+- **Esc** cancels setup. **Ctrl+Alt+S** stops everything. **Ctrl+Shift+Q** quits.
 
-Normal permits awake recline as supporting evidence, not an automatic offence. High Alert shortens persistence thresholds and disables learning. Super Alert also alarms on calibrated recline after a 0.35-second debounce. Neck pitch is separate from chair recline.
+Eyes-open stages say Sample complete. Only closed/half-closed stages require Open your eyes; empty-chair completion says You may return to your chair. The brief reopen cue cannot be skipped to start another eye-closed take. Closed captures remain bounded at 3 seconds; half-closed at 5 seconds. Open-eye captures can extend only to a bounded deadline if quality recovers. Poor measurements are not automatically labelled safe.
 
-The concern meter is a **heuristic 0–100 accumulation, not a probability of sleep**. Sustained visible eye closure can alarm independently of input activity. Fresh, measurable open eyes for three seconds clear alerts except continuing forbidden Super Alert recline. Acknowledgement does not erase hard-condition timers or create a long blind cooldown.
+The calibration has 15 labelled stages covering normal work, individual screens, side angles, reading, neck down/up, recline, half/closed eyelids and empty chair. It validates separation, direction and sample quality; rejects stale/inverted samples; and backs up prior accepted calibration. Moving the camera requires restarting full calibration so old and new geometry are not mixed. See `docs/CALIBRATION_USABILITY_FIX.md` for technical detail.
 
-Missing face is **not** AWAY. Tracking loss/camera failure raises uncertainty. Automatic AWAY requires no detected face/body plus a stable match to the calibrated coarse empty-scene descriptor for three seconds; it is disabled when occupied/empty views cannot be separated. This is camera evidence, not a physical seat sensor.
+## Vivid alerts and brightness
 
-Each selected work screen must pass its own quality gate. Samples require sufficient fresh frames, usable duration, open/closed/half-eye separation, opposite neck directions and separable upright/recline geometry. Bad/reversed labels are rejected, not swapped or bypassed. Prior profiles are backed up before accepted replacement. Diagnostics expose blocking measurement gates without recording video. A genuinely unobservable camera angle can still require physical repositioning.
+**Red / white** uses `#ff0000` / `#ffffff`; **Red / blue** uses `#ff0000` / `#0000ff`. Each connected monitor has its own fullscreen window; text and steady control buttons occupy one screen only. Alternation changes colour once per second (a full cycle takes two seconds). Uncheck alternation for steady white. There is no rapid strobe. Bright changing colours can be unsuitable for photosensitivity; the screen test asks for explicit confirmation and auto-stops after ten seconds. Timeout alone does not claim you saw the test.
 
-Eye references are viewpoint-dependent and side-specific; an occluded eye is excluded, and one clearly closed visible eye is not averaged away by the other. Unresolvable reclined eyes are marked unknown, not filled with generic values. Session-only adaptation is restricted to Normal, clearly open eyes, recent interaction, low concern, no recent alarm and 30 qualifying seconds; it is slow, upward-only and capped at 5%. Closed-eye, neck and chair anchors do not auto-drift. Camera/resolution changes and substantial lighting changes request rechecking; not every physical camera movement is automatically detectable.
+Maximum brightness is requested through native Windows WMI and DDC/CI APIs **where supported**, not a gamma hack or a display-driver installation. The original value is recorded before a write; changes are read back. A worker keeps hardware calls out of the UI, restores after acknowledgement/auto-clear/Stop/Quit, and restores on parent disconnection or lost heartbeat when the driver remains responsive. A journal and Restore brightness control allow retry after a failure. Settings on unreadable/unsupported monitors are not guessed.
 
-## Find My, privacy and limitations
+A hung driver, unplugged monitor, restricted control or unusual monitor firmware can prevent a successful change or restore. Such results are reported as unavailable/unconfirmed, not silently called success. Monitor buttons may still be required. Test on the actual office displays before relying on automatic brightness. The assistant's test environments do not prove compatibility with your physical monitors.
 
-`phone_alarm_findmy.py` runs in the separate phone environment over private subprocess pipes. The main app does not import `pyicloud`. Network/authentication never runs on the Tk interface thread. Timeouts/dead workers/expired authentication revoke readiness visibly. Only Play Sound is exposed, never erase/lost mode. No automatic terms acceptance.
+Own alert illumination is excluded from learning and lighting-drift classification during its short recovery window, without suppressing sustained eye closure, head/recline rules or camera-failure warnings.
 
-Find My is **not a cellular call**. API acceptance proves neither delivery, audibility, earbud routing nor awakening. It requires internet/authentication and uses unofficial service access that may change. The upstream library may retrieve device/location metadata during listing; WakeGuard does not display/save/log locations.
+## Detection and independent phone channel
 
-Passwords are not put in command lines, logs, Git or settings. The worker retains authentication data in memory; private app data may contain session cookies. Protect it like browser-session data and never upload it. No webcam video, screenshots or microphone audio are recorded. Preview images stay in local memory/pipes. Saved calibration contains numeric summaries and a coarse 6-by-4 grayscale scene descriptor, not full video frames.
+Normal allows awake recline as contributing evidence, not an immediate violation. High Alert is stricter and disables learning. Super Alert forbids calibrated recline. Neck drop is distinct from chair recline. The concern meter is a heuristic, **not a probability of sleep**.
 
-## Tests
+Sustained observable eye closure can alarm independently of keyboard activity. Fresh open eyes for three seconds clear the alarm except continuing forbidden recline in Super Alert. Missing face/eyes is uncertainty, not automatically AWAY. Automatic AWAY requires absent face/body plus a stable calibrated empty-scene match. Continuous adaptation is slow, bounded, session-only and never rewrites closed-eye/neck/recline anchors.
+
+Find My runs in the separate phone environment. Complete account/2FA and explicitly select the exact iPhone, send a sound test, then confirm **I heard the test**. There is a 130-second minimum interval including tests. No credentials are requested during an alarm, and no erase/lost-mode commands exist. Only Play Sound is exposed.
+
+**Find My is not a cellular call.** Delivery, audible output, earbud routing and awakening are not guaranteed. A sound already submitted to Apple cannot be recalled by closing WakeGuard; dismiss it on the phone. Expired authentication/timeouts revoke readiness visibly. Passwords are not placed in command lines, Git, settings or logs. Protect local session cookies like browser session data.
+
+No video, screenshots of the user's work, or microphone recordings are saved. Numeric calibration/diagnostics and a coarse empty-scene descriptor are local. Monitoring does not use PC alarm sound. Setup speech is local Windows synthesis. User-invoked phone operations contact Apple.
+
+## Development and evidence
+
+`wakeguard/controller.py` preserves the 0.2.2 calibration/control layer. `app.py` and `dashboard.py` provide the guided desktop. Brightness has transaction, native-driver and worker modules. `AGENTS.md` describes invariants for Codex. Use explicit private interpreter paths and preserve edits.
 
 ```powershell
 .\.venv_wakeguard\Scripts\python.exe -m unittest discover -s tests -v
 .\Start-WakeGuard.cmd --demo
 ```
 
-GUI tests open actual windows; enable them only in a suitable setting:
-
-```powershell
-$env:WAKEGUARD_GUI_TESTS='1'
-.\.venv_wakeguard\Scripts\python.exe -m unittest discover -s tests -v
-Remove-Item Env:WAKEGUARD_GUI_TESTS
-```
-
-The demo uses synthetic observations. Latest QA: `docs/CALIBRATION_USABILITY_FIX.md` (175 Windows tests, including 66 Tk GUI tests). Earlier reports: `docs/CALIBRATION_KEYBOARD_FIX.md` and `docs/QA_REPORT.md`. Physical camera/microphone/phone acceptance is still required. Passing automated tests establishes no real-world false-negative rate. `AGENTS.md` gives local coding agents project safeguards.
-
-Primary references: the pinned MediaPipe/Pyicloud packages, upstream timlaing/pyicloud, Microsoft System.Speech documentation, Astral uv Python-install documentation, Python venv documentation and Apple's Find My Play Sound documentation. No paid service is required by this implementation.
+GUI tests are opt-in because they open real windows: set `WAKEGUARD_GUI_TESTS=1` only in a suitable test setting. No physical brightness writes are performed by the regression suite. Review `docs/OFFICE_RELEASE_030.md` for actual Windows/installer results and the remaining hardware acceptance checklist.

@@ -1,0 +1,67 @@
+"""CI-only real pythonw launcher check; synthetic UI, no hardware/account use."""
+from __future__ import annotations
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+def child(repository: Path, output: Path) -> None:
+    import runpy
+    output.mkdir(parents=True, exist_ok=True)
+    os.environ['WAKEGUARD_DATA_DIR'] = str(output / 'private-demo-data')
+    sys.path.insert(0, str(repository))
+    from wakeguard.app import App
+    from wakeguard import __version__
+    from wakeguard.runtime import worker_python
+    from PIL import ImageGrab
+    original = App.__init__
+
+    def initialize(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        def capture_and_close():
+            try:
+                for page in ('setup', 'alerts', 'live'):
+                    self.view.select(page)
+                    self.view.render()
+                    self.root.update()
+                    x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
+                    image = ImageGrab.grab(bbox=(x, y, x + self.root.winfo_width(), y + self.root.winfo_height()))
+                    image.save(output / ('wakeguard-' + page + '.png'))
+                (output / 'launcher-receipt.json').write_text(json.dumps({
+                    'executable': sys.executable, 'worker_executable': worker_python(),
+                    'version': __version__, 'real_gui': True, 'demo_only': True
+                }, indent=2), encoding='utf-8')
+            finally:
+                self.quit()
+        self.root.after(750, capture_and_close)
+    App.__init__ = initialize
+    sys.argv = [str(repository / 'wakeguard_launcher.pyw'), '--demo']
+    runpy.run_path(str(repository / 'wakeguard_launcher.pyw'), run_name='__main__')
+
+
+def main():
+    child_mode = '--child' in sys.argv
+    args = [a for a in sys.argv[1:] if a != '--child']
+    if len(args) != 2:
+        raise SystemExit('Usage: smoke_windowless.py REPOSITORY OUTPUT')
+    repository, output = (Path(a).resolve() for a in args)
+    if child_mode:
+        child(repository, output)
+        return
+    pythonw = Path(sys.executable).with_name('pythonw.exe') if os.name == 'nt' else Path(sys.executable)
+    if not pythonw.exists():
+        raise SystemExit('No windowless interpreter beside the test Python')
+    subprocess.run([str(pythonw), '-E', '-s', '-B', str(Path(__file__).resolve()), '--child',
+                    str(repository), str(output)], timeout=30, check=True)
+    receipt = json.loads((output / 'launcher-receipt.json').read_text(encoding='utf-8'))
+    if os.name == 'nt' and (not receipt['executable'].lower().endswith('pythonw.exe')
+                           or not receipt['worker_executable'].lower().endswith('python.exe')):
+        raise SystemExit('Windowless UI / console-worker interpreter routing is wrong')
+    print('PASS: actual windowless launcher, demo dashboard, owned instance shutdown and explicit worker interpreter.')
+    print(json.dumps(receipt))
+
+
+if __name__ == '__main__':
+    main()
