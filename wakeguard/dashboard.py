@@ -169,8 +169,8 @@ class Dashboard:
         self.root.bind("<Button-4>", lambda e: self._wheel(e, -3), add="+")
         self.root.bind("<Button-5>", lambda e: self._wheel(e, 3), add="+")
         top = tk.Frame(self.workspace, bg=BG); top.pack(fill="x", padx=22, pady=(18, 12))
-        self.heading = self._label(top, "Make this desk yours", 20, True, bg=BG); self.heading.pack(anchor="w")
-        self.subtitle = self._label(top, "One next step at a time. Nothing starts in the background.", 10, color=MUTED, bg=BG)
+        self.heading = self._label(top, "Stay Alert", 20, True, bg=BG); self.heading.pack(anchor="w")
+        self.subtitle = self._label(top, "Look awake, keep your KPI", 10, color=MUTED, bg=BG)
         self.subtitle.pack(anchor="w", pady=(4, 0))
         rail = tk.Frame(self.workspace, bg=BG); rail.pack(fill="x", padx=22, pady=(0, 12))
         for i, name in enumerate(("Camera", "Audio", "Calibrate", "Verify", "Alerts"), 1):
@@ -321,7 +321,7 @@ class Dashboard:
             self.navigation[key].configure(bg="#23364d" if key == name else NAVY,
                                             fg="white" if key == name else "#9daec4")
         self.pages[name].pack(fill="both", expand=True)
-        titles = {"setup": ("Make this desk yours", "One next step at a time. Nothing starts automatically."),
+        titles = {"setup": ("Stay Alert", "Look awake, keep your KPI"),
                   "live": ("Your live workspace", "Clear status. Independent alerts. Immediate stop."),
                   "alerts": ("Make the alert unmistakable", "Vivid colour, temporary brightness, a separate phone channel."),
                   "diagnostics": ("Details without the guesswork", "Measurement quality and event history, when you need them.")}
