@@ -6,6 +6,7 @@ on:
       - 'Start-WakeGuard.cmd'
       - 'Update-WakeGuard.cmd'
       - 'wakeguard_launcher.pyw'
+      - 'wakeguard/**'
       - 'scripts/smoke_windowless.py'
       - '.github/workflows/office-package.yml'
   workflow_dispatch:

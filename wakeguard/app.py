@@ -25,11 +25,16 @@ class App(CalibrationController):
         self.alert_consent = False
         super().__init__(root, demo=demo, testing=testing)
         self.screen.brightness = self.brightness
-        self.root.geometry(f"1060x{min(850, max(640, self.root.winfo_screenheight() - 100))}")
-        self.root.minsize(860, 620)
+        self._fit_window()
         self.view.render()
         if not testing and self.brightness.journal.exists():
             self.brightness.restore_previous()
+
+    def _fit_window(self):
+        width = min(1060, max(860, self.root.winfo_screenwidth() - 80))
+        height = min(850, max(620, self.root.winfo_screenheight() - 100))
+        self.root.minsize(860, 620)
+        self.root.geometry(f"{width}x{height}")
 
     def _settings(self):
         settings = super()._settings()
