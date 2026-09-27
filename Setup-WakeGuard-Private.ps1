@@ -125,14 +125,14 @@ try {
     if (-not (Test-Path -LiteralPath $privatePython)) { throw 'Private Python was not found at the expected location.' }
     Assert-OrdinaryPath $privatePython
     Invoke-CheckedPrivate $privatePython @('-I','-B','-c',
-        'import sys,struct,ssl,venv,ensurepip,tkinter; assert sys.version_info[:3]==(3,12,10) and struct.calcsize("P")==8; r=tkinter.Tk(); r.withdraw(); r.update(); r.destroy(); print("Private Python 3.12.10 x64 and Tcl/Tk passed")')
+        "import sys,struct,ssl,venv,ensurepip,tkinter; assert sys.version_info[:3]==(3,12,10) and struct.calcsize('P')==8; r=tkinter.Tk(); r.withdraw(); r.update(); r.destroy(); print('Private Python 3.12.10 x64 and Tcl/Tk passed')")
     # Refuse to repurpose an environment whose base interpreter is somewhere else.
     foreach ($name in @('.venv_wakeguard','.venv_phone')) {
         $target = Join-Path $root $name
         if (Test-Path -LiteralPath $target) {
             $exe = Join-Path $target 'Scripts\python.exe'
             if (-not (Test-Path -LiteralPath $exe)) { throw "Incomplete environment at $target. No automatic deletion was attempted." }
-            $check = 'import sys,os; n=lambda p:os.path.normcase(os.path.realpath(p)); assert sys.prefix!=sys.base_prefix and n(sys.prefix)==n(sys.argv[1]) and n(sys._base_executable)==n(sys.argv[2]), "Existing environment uses another Python; stopping without changing it"'
+            $check = "import sys,os; n=lambda p:os.path.normcase(os.path.realpath(p)); assert sys.prefix!=sys.base_prefix and n(sys.prefix)==n(sys.argv[1]) and n(sys._base_executable)==n(sys.argv[2]), 'Existing environment uses another Python; stopping without changing it'"
             Invoke-CheckedPrivate $exe @('-I','-B','-c',$check,$target,$privatePython)
             $cfg = Get-Content -LiteralPath (Join-Path $target 'pyvenv.cfg') -Raw
             if ($cfg -match '(?im)^include-system-site-packages\s*=\s*true') {
