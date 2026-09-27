@@ -1,0 +1,77 @@
+name: Office package and isolation
+on:
+  push:
+    paths:
+      - 'Install-WakeGuard.ps1'
+      - 'Start-WakeGuard.cmd'
+      - 'Update-WakeGuard.cmd'
+      - 'wakeguard_launcher.pyw'
+      - '.github/workflows/office-package.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  office:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      WAKEGUARD_GUI_TESTS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record unrelated Python and prepare immutable source archive
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          (Get-Command python.exe).Source | Set-Content "$env:RUNNER_TEMP\wg-python-before.txt"
+          $env:PATH | Set-Content "$env:RUNNER_TEMP\wg-path-before.txt"
+          python -m venv "$env:RUNNER_TEMP\wg-unrelated-project"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot create unrelated test environment' }
+          & "$env:RUNNER_TEMP\wg-unrelated-project\Scripts\python.exe" -m pip list --format=json | Set-Content "$env:RUNNER_TEMP\wg-packages-before.txt"
+          git archive --format=zip --prefix=package/ HEAD -o "$env:RUNNER_TEMP\wg-source.zip"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot create exact source archive' }
+      - name: Install into selectable folder with spaces - no system Python installer or Git clone
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\Install-WakeGuard.ps1 -Destination "$env:RUNNER_TEMP\WakeGuard office desk" -SourceRef $env:GITHUB_SHA -ArchivePath "$env:RUNNER_TEMP\wg-source.zip" -NoLaunch -NoShortcut
+          if ($LASTEXITCODE -ne 0) { throw 'Office package install failed' }
+      - name: Verify isolation, protected folders, running-instance lock, and repeat update
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dest = "$env:RUNNER_TEMP\WakeGuard office desk"
+          if ((Get-Command python.exe).Source -cne (Get-Content "$env:RUNNER_TEMP\wg-python-before.txt" -Raw).Trim()) { throw 'Default Python changed' }
+          if ($env:PATH -cne (Get-Content "$env:RUNNER_TEMP\wg-path-before.txt" -Raw).Trim()) { throw 'PATH changed' }
+          $packages = & "$env:RUNNER_TEMP\wg-unrelated-project\Scripts\python.exe" -m pip list --format=json
+          if (($packages -join "`n").Trim() -cne (Get-Content "$env:RUNNER_TEMP\wg-packages-before.txt" -Raw).Trim()) { throw 'Unrelated packages changed' }
+          $protected = "$env:RUNNER_TEMP\wg-protected"
+          New-Item -ItemType Directory -Path $protected | Out-Null
+          'do not alter' | Set-Content "$protected\my-project.txt"
+          $refused = $false
+          try { & .\Install-WakeGuard.ps1 -Destination $protected -SourceRef $env:GITHUB_SHA -ArchivePath "$env:RUNNER_TEMP\wg-source.zip" -NoLaunch -NoShortcut } catch { $refused = $true }
+          if (-not $refused -or (Get-Content "$protected\my-project.txt") -ne 'do not alter') { throw 'Nonempty-folder protection failed' }
+          $hold = [IO.File]::Open("$dest\.bootstrap\wakeguard-running.lock", 'Open', 'ReadWrite', 'Read')
+          $refused = $false
+          try { & .\Install-WakeGuard.ps1 -Destination $dest -Update -SourceRef $env:GITHUB_SHA -ArchivePath "$env:RUNNER_TEMP\wg-source.zip" -NoLaunch -NoShortcut } catch { $refused = $true } finally { $hold.Dispose() }
+          if (-not $refused) { throw 'Running instance protection failed' }
+          & .\Install-WakeGuard.ps1 -Destination $dest -Update -SourceRef $env:GITHUB_SHA -ArchivePath "$env:RUNNER_TEMP\wg-source.zip" -NoLaunch -NoShortcut
+          if ($LASTEXITCODE -ne 0) { throw 'Package update failed' }
+          Add-Content "$dest\README.md" 'Uncommitted work must be preserved'
+          $refused = $false
+          try { & .\Install-WakeGuard.ps1 -Destination $dest -Update -SourceRef $env:GITHUB_SHA -ArchivePath "$env:RUNNER_TEMP\wg-source.zip" -NoLaunch -NoShortcut } catch { $refused = $true }
+          if (-not $refused) { throw 'Local edit protection failed' }
+          Write-Host 'PASS: selectable path with spaces, install/update, unrelated Python/packages, nonempty folders and running locks.'
+      - name: Parse new scripts and read-only native brightness discovery
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($file in @('Install-WakeGuard.ps1','scripts\brightness.ps1')) {
+            $tokens=$null; $errors=$null
+            [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $pwd $file),[ref]$tokens,[ref]$errors) | Out-Null
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+          $dest = "$env:RUNNER_TEMP\WakeGuard office desk"
+          Set-Location $dest
+          & .\.venv_wakeguard\Scripts\python.exe -c "from wakeguard.brightness_native import DdcDriver; d=DdcDriver(); print('Read-only DDC discovery:',len(d.discover())); d.close()"
+          if ($LASTEXITCODE -ne 0) { throw 'Native API declaration/read-only discovery failed' }

@@ -46,7 +46,7 @@ jobs:
       - name: Parse Windows scripts without playing sound or opening microphone
         shell: powershell
         run: |
-          $files = @('Setup-WakeGuard.ps1', 'scripts\speak.ps1', 'scripts\voice.ps1')
+          $files = @('Setup-WakeGuard.ps1', 'scripts\speak.ps1', 'scripts\voice.ps1', 'scripts\brightness.ps1', 'Install-WakeGuard.ps1')
           foreach ($file in $files) {
             $tokens = $null
             $errors = $null

@@ -1,17 +1,11 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-set "PYTHONDONTWRITEBYTECODE=1"
-set "WG_PY=%~dp0.venv_wakeguard\Scripts\python.exe"
+set "WG_PY=%~dp0.venv_wakeguard\Scripts\pythonw.exe"
 if not exist "%WG_PY%" (
-  echo Run Setup-WakeGuard.ps1 first. Existing old environments are not used.
+  echo Run Setup-WakeGuard-Private.ps1 first. Existing system Python is not used.
   pause
   exit /b 1
 )
-"%WG_PY%" -B "%~dp0mvsa_app.py" %*
-if errorlevel 1 (
-  echo WakeGuard exited with an error. Run scripts\doctor.py in the vision environment.
-  pause
-  exit /b 1
-)
+start "" "%WG_PY%" -E -s -B "%~dp0wakeguard_launcher.pyw" %*
 endlocal

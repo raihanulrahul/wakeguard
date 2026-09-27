@@ -2,6 +2,11 @@
 from __future__ import annotations
 import os
 import tkinter as tk
+import time
+
+ALERT_COLORS = {"Red / white": ("#ff0000", "#ffffff"), "Red / blue": ("#ff0000", "#0000ff")}
+COLOUR_INTERVAL_MS = 1000  # A full two-colour cycle takes TWO seconds, not a strobe.
+TEST_MAX_SECONDS = 10
 
 
 def dpi_awareness():
@@ -42,15 +47,17 @@ def place(window, geometry):
         if not user32.SetWindowPos(hwnd, wintypes.HWND(-1), x, y, w, h, 0x0040 | 0x0010):
             raise OSError("Cannot position monitor overlay")
     else:
-        # Non-Windows demo/testing only; Windows uses absolute native placement.
         window.geometry(f"{w}x{h}{x:+d}{y:+d}")
 
 
 class ScreenBackend:
     name = "Screen alert"
 
-    def __init__(self, root, acknowledge, stop_all, quit_app, monitor_provider=None):
+    def __init__(self, root, acknowledge, stop_all, quit_app, monitor_provider=None, brightness=None):
         self.root = root
+        self.brightness = brightness
+        self.palette = "Red / white"
+        self.started = 0.0
         self.acknowledge = acknowledge
         self.stop_all = stop_all
         self.quit_app = quit_app
@@ -60,7 +67,7 @@ class ScreenBackend:
         self.job = None
         self.active = False
         self.test = False
-        self.pulse = False
+        self.pulse = True
         self.phase = True
         self.reason = ""
 
@@ -73,6 +80,7 @@ class ScreenBackend:
         self.active = True
         self.test = test
         self.phase = True
+        self.started = time.monotonic()
         layout = self.monitor_provider()
         selected = next((i for i, m in enumerate(layout) if m.get("primary")), 0)
         text_window = None
@@ -82,8 +90,7 @@ class ScreenBackend:
                 window.title("WakeGuard alert")
                 window.overrideredirect(True)
                 window.attributes("-topmost", True)
-                window.configure(bg="#fff2bf")
-                # Append before potentially failing placement; cleanup is all-or-nothing.
+                window.configure(bg=ALERT_COLORS.get(self.palette, ALERT_COLORS["Red / white"])[0] if self.pulse else "#ffffff")
                 self.windows.append(window)
                 place(window, geometry)
                 for seq, action in (("<space>", self.acknowledge), ("<Escape>", self.acknowledge),
@@ -93,7 +100,6 @@ class ScreenBackend:
                                     ("<Control-Shift-Q>", self.quit_app),
                                     ("<Control-Shift-q>", self.quit_app)):
                     window.bind(seq, lambda event, cb=action: self._key(cb))
-                # Steady control panel: not flashing underneath the mouse.
                 if i == selected:
                     panel = tk.Frame(window, bg="#172333", padx=36, pady=24)
                     panel.place(relx=.5, rely=.5, anchor="center")
@@ -111,7 +117,12 @@ class ScreenBackend:
                     text_window = window
             if text_window is not None:
                 text_window.focus_force()
-            self._tick()
+            if self.brightness:
+                try:
+                    self.brightness.begin()
+                except Exception:
+                    self.brightness.status = "Automatic brightness failed; alert colours remain active"
+            self.job = self.root.after(COLOUR_INTERVAL_MS, self._tick)
         except Exception:
             self.stop()
             raise
@@ -122,16 +133,26 @@ class ScreenBackend:
         return "break"
 
     def _tick(self):
+        if self.job is not None:
+            try:
+                self.root.after_cancel(self.job)
+            except tk.TclError:
+                pass
         self.job = None
         if not self.active:
             return
+        if self.test and time.monotonic() - self.started >= TEST_MAX_SECONDS:
+            self.stop()
+            return
         self.phase = not self.phase if self.pulse else True
         for window in self.windows:
-            window.configure(bg="#fff2bf" if self.phase else "#aebacc")
-        # One complete pulse every two seconds, not a rapid red/white strobe.
-        self.job = self.root.after(1000, self._tick)
+            colours = ALERT_COLORS.get(self.palette, ALERT_COLORS["Red / white"])
+            window.configure(bg=colours[0 if self.phase else 1] if self.pulse else "#ffffff")
+        self.job = self.root.after(COLOUR_INTERVAL_MS, self._tick)
 
     def stop(self):
+        if self.brightness:
+            self.brightness.stop()
         self.active = self.test = False
         if self.job is not None:
             try:

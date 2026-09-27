@@ -14,6 +14,16 @@ ROOT = Path(__file__).resolve().parent.parent
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
 
+def worker_python() -> str:
+    """Use console Python with explicit pipes, even when UI uses pythonw.exe."""
+    executable = Path(sys.executable)
+    if os.name == "nt" and executable.name.lower() == "pythonw.exe":
+        candidate = executable.with_name("python.exe")
+        if candidate.exists():
+            return str(candidate)
+    return str(executable)
+
+
 def stop_process(process: subprocess.Popen | None) -> None:
     """Bounded shutdown of THIS process only, never taskkill-all-Python."""
     if process is None:
@@ -86,7 +96,6 @@ class Channel:
     def send(self, data: dict) -> None:
         if not self.alive:
             raise RuntimeError("Worker is not running")
-        # Small commands only; never put passwords in argv, environment or logs.
         self.process.stdin.write(json.dumps(data, ensure_ascii=True) + "\n")
         self.process.stdin.flush()
 
@@ -217,8 +226,6 @@ class InputMonitor:
                 elif k in ("space", "esc", "r", "b"):
                     action = k
                 if action:
-                    # Only command metadata, never arbitrary key contents. Stale
-                    # queued commands must not cross a setup/alert transition.
                     self.events.put({"action": action, "at": self.last_activity})
 
             def release(key) -> None:

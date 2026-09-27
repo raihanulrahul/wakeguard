@@ -42,6 +42,7 @@ class Engine:
     def __init__(self, profile: Profile, mode: str = "Normal") -> None:
         self.profile = profile
         self.mode = mode
+        self.display_light_until = -float("inf")
         self.battery = 0.0
         self.active = False
         self.reason = ""
@@ -66,7 +67,6 @@ class Engine:
         self.active = False
         self.quiet_until = now + 1
         self.battery = min(self.battery, MODES[self.mode].warning - 5)
-        # Sustained closure and forbidden recline are not erased by a tap.
         self.timers.pop("recovered", None)
 
     def set_away(self, now: float) -> None:
@@ -101,8 +101,8 @@ class Engine:
 
         camera_fault = not fresh
         changed_camera = fresh and o.camera_key != self.profile.camera_key
-        # Alert light must not poison the light-change detector or its recovery.
-        changed_light = fresh and abs(o.brightness - self.profile.brightness) > 65 and not self.active and now - self.last_alarm > 5
+        own_display_light = now < self.display_light_until
+        changed_light = fresh and not own_display_light and abs(o.brightness - self.profile.brightness) > 65 and not self.active and now - self.last_alarm > 5
         light_for = self.dwell("light_changed", changed_light, now)
         eye_values = self.profile.eye_ratios(o, self.adaptation) if fresh and not changed_camera else []
         eye = min(eye_values) if eye_values else None
@@ -171,7 +171,7 @@ class Engine:
             self.timers.pop("recovered", None)
             auto = True
 
-        learning_candidate = (cfg.learning and fresh and not self.active and not reasons
+        learning_candidate = (cfg.learning and not own_display_light and fresh and not self.active and not reasons
                               and self.battery < 15 and eye is not None and .9 <= eye <= 1.15
                               and (recline or 0) < .25 and (neck or 0) < .25
                               and input_age is not None and input_age < 10

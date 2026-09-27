@@ -17,5 +17,7 @@ icloud_session/
 *.cookies
 .DS_Store
 Thumbs.db
-.bootstrap/
 .runtime/
+.bootstrap/
+
+.wakeguard-package.json
