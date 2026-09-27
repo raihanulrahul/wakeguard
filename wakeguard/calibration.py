@@ -4,6 +4,7 @@ import math
 from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from .face_context import valid_shape, shape_distance
 from .model import Observation, Profile, SCHEMA, angle_delta, finite, median, robust_spread, scene_distance
 
 
@@ -30,8 +31,8 @@ class Stage:
 
 
 STAGES = (
-    Stage("main", 10, "Sit upright in your normal working position. Look at your main work monitor, NOT the camera."),
-    Stage("monitors", 8, "Read normally on this ONE screen. Keep your usual working posture and eyes open. Do not sweep between screens during capture."),
+    Stage("main", 10, "Sit upright in your normal working position. Look at your main work monitor, NOT the camera. Read naturally; small head movements are welcome."),
+    Stage("monitors", 8, "Read naturally on this screen with your normal working posture. You do not have to keep your head still."),
     Stage("left", 8, "Turn your body slightly left as you might while working. Keep eyes open."),
     Stage("right", 8, "Turn your body slightly right as you might while working. Keep eyes open."),
     Stage("reading", 8, "Look a little down as when reading a document. Stay in an ordinary awake posture."),
@@ -45,6 +46,11 @@ STAGES = (
     Stage("closed_left", 3, "Sit upright, slightly turned left. Briefly close your eyes only when you hear Begin.", "closed"),
     Stage("closed_right", 3, "Sit upright, slightly turned right. Briefly close your eyes only when you hear Begin.", "closed"),
     Stage("empty", 12, "After Begin, leave your chair and move fully out of camera view. Wait for the completion message before returning.", "absent"),
+)
+
+GLASSES_STAGES = (
+    Stage("glasses_on_open", 6, "Put your glasses ON now. Read naturally on this screen with your eyes normally open. Glare is allowed; do not change posture just to help the camera.", allow_blind=True),
+    Stage("glasses_on_closed", 3, "Keep your glasses ON and your normal position at this screen. Briefly close your eyes only when you hear Begin.", "closed", True),
 )
 
 
@@ -66,10 +72,32 @@ def summarize(samples: list[Observation]) -> dict:
             xs = [origin + angle_delta(x, origin) for x in xs]
         result[name] = median(xs) if xs else None
         result[name + "_spread"] = robust_spread(xs) if xs else None
+    shapes = [o.shape for o in samples if valid_shape(o.shape)]
+    result["shape"] = [median([v[i] for v in shapes]) for i in range(5)] if len(shapes) >= 5 else []
+    result["shape_spread"] = [robust_spread([v[i] for v in shapes]) for i in range(5)] if len(shapes) >= 5 else []
+    result["angle_frames"] = sum(o.pose_valid() for o in samples)
     return result
 
 
 def view_clusters(samples: list[Observation]) -> list[dict]:
+    relative = [o for o in samples if valid_shape(o.shape) and o.geometry_valid()]
+    if relative:
+        groups = []
+        for o in relative:
+            nearest = min(groups, key=lambda g: shape_distance(o.shape, g[0].shape)) if groups else None
+            if nearest is not None and shape_distance(o.shape, nearest[0].shape) <= 1.5:
+                nearest.append(o)
+            else:
+                groups.append([o])
+        # Normal motion near arbitrary bin edges must not split a good take into
+        # many rejected tiny bins. Merge nearby small groups, never distant views.
+        large = [g for g in groups if len(g) >= 8]
+        for group in (g for g in groups if len(g) < 8):
+            nearest = min(large, key=lambda g: shape_distance(group[0].shape,g[0].shape)) if large else None
+            if nearest is not None and shape_distance(group[0].shape,nearest[0].shape)<=2:
+                nearest.extend(group)
+        views = [summarize(g) for g in large]
+        return [v for v in views if finite(v.get("left")) or finite(v.get("right"))]
     buckets: dict[tuple[int, int], list[Observation]] = {}
     for o in samples:
         if o.pose_valid():
@@ -91,9 +119,11 @@ def measurement_issue(o: Observation, now: float, stage: Stage) -> str:
         return "" if o.scene else "empty-scene measurement unavailable"
     if not o.face:
         return "face not detected at this position"
-    if not o.pose_valid():
+    if not o.context_valid():
         reason = o.diagnostics.get("pose_reason", "")
         return "head pose unavailable" + (": " + reason if reason else "")
+    # Euler head angles are diagnostic only when direct face context is usable.
+    # A failed generic 3-D fit must not erase good eye or recline observations.
     if not stage.allow_blind and not (o.valid_eye("left") or o.valid_eye("right")):
         details = []
         for side in ("left", "right"):
@@ -106,13 +136,17 @@ def measurement_issue(o: Observation, now: float, stage: Stage) -> str:
 
 class CalibrationSession:
     """Labelled capture with bounded recovery time and per-screen coverage."""
-    def __init__(self, monitor_count: int = 1) -> None:
+    def __init__(self, monitor_count: int = 1, glasses_enabled: bool = False) -> None:
         if isinstance(monitor_count, bool) or monitor_count not in (1, 2, 3):
             raise ValueError("Screens used must be 1, 2 or 3")
         self.index = 0
         self.monitor_count = monitor_count
+        self.glasses_enabled = bool(glasses_enabled)
         self.monitor_index = 0
         self.monitor_samples: dict[int, list[Observation]] = {}
+        self.closed_monitor_samples: dict[int, list[Observation]] = {}
+        self.glasses_open_samples: dict[int, list[Observation]] = {}
+        self.glasses_closed_samples: dict[int, list[Observation]] = {}
         self.samples: dict[str, list[Observation]] = {}
         self.capture_reports: dict[str, dict] = {}
         self.current: list[Observation] = []
@@ -129,18 +163,39 @@ class CalibrationSession:
         self.recording = False
 
     @property
+    def stages(self):
+        return STAGES + GLASSES_STAGES if self.glasses_enabled else STAGES
+
+    @property
+    def total_steps(self) -> int:
+        return len(self.stages)
+
+    @property
+    def relative(self) -> bool:
+        return any(valid_shape(o.shape) for o in self.samples.get("main", []) + self.current)
+
+    @property
+    def screen_stage(self) -> bool:
+        key = self.stages[self.index].key
+        return key in ("monitors", "glasses_on_open", "glasses_on_closed") or (self.relative and key == "closed_main")
+
+    @property
     def stage(self) -> Stage:
-        base = STAGES[self.index]
-        if base.key == "monitors":
+        base = self.stages[self.index]
+        if self.screen_stage:
             name = ("MAIN work screen", "SECOND work screen", "THIRD work screen")[self.monitor_index]
+            if base.key == "closed_main":
+                instruction = "Keep your usual position at this screen. Briefly close your eyes only when you hear Begin."
+            else:
+                instruction = base.instruction
             return replace(base, instruction=f"Screen {self.monitor_index + 1} of {self.monitor_count}. "
-                           f"Look at your {name}. " + base.instruction)
+                           f"Look at your {name}. " + instruction)
         return base
 
     @property
     def label(self) -> str:
-        label = f"Step {self.index + 1}/{len(STAGES)}"
-        if self.stage.key == "monitors":
+        label = f"Step {self.index + 1}/{self.total_steps}"
+        if self.screen_stage:
             label += f" · screen {self.monitor_index + 1}/{self.monitor_count}"
         return label
 
@@ -248,12 +303,29 @@ class CalibrationSession:
 
     def finish(self) -> None:
         self.recording = False
+        optional = self.stage.key not in ("main", "monitors", "closed_main", "glasses_on_open", "glasses_on_closed")
+        if self.relative and optional and (self.final_issue or not self.quality_met):
+            self.samples[self.stage.key] = []
+            self.capture_reports[self.stage.key] = {"unavailable": True, "reason": self.quality_summary()}
+            return  # This support channel is unavailable, not a failed person.
         if self.final_issue:
             raise CalibrationError(f"{self.label} ({self.stage.key}): {self.final_issue}. " + self.quality_summary())
         if not self.quality_met:
             raise CalibrationError(f"{self.label} ({self.stage.key}): {self.quality_summary()}. "
                                    "Hold only the requested screen position. If you reposition the camera, restart the full calibration.")
-        if self.stage.key == "monitors":
+        if self.stage.key == "glasses_on_open":
+            self.glasses_open_samples[self.monitor_index] = list(self.current)
+            self.samples["glasses_on_open"] = [o for i in sorted(self.glasses_open_samples) for o in self.glasses_open_samples[i]]
+            key = f"glasses_open_screen_{self.monitor_index + 1}"
+        elif self.stage.key == "glasses_on_closed":
+            self.glasses_closed_samples[self.monitor_index] = list(self.current)
+            self.samples["glasses_on_closed"] = [o for i in sorted(self.glasses_closed_samples) for o in self.glasses_closed_samples[i]]
+            key = f"glasses_closed_screen_{self.monitor_index + 1}"
+        elif self.relative and self.stage.key == "closed_main":
+            self.closed_monitor_samples[self.monitor_index] = list(self.current)
+            self.samples["closed_main"] = [o for i in sorted(self.closed_monitor_samples) for o in self.closed_monitor_samples[i]]
+            key = f"closed_screen_{self.monitor_index + 1}"
+        elif self.stage.key == "monitors":
             self.monitor_samples[self.monitor_index] = list(self.current)
             self.samples["monitors"] = [o for i in sorted(self.monitor_samples) for o in self.monitor_samples[i]]
             key = f"monitors_{self.monitor_index + 1}"
@@ -264,33 +336,36 @@ class CalibrationSession:
                                      "usable_seconds": self.valid_seconds, "rejected": dict(self.rejected)}
 
     def advance(self) -> bool:
-        if self.stage.key == "monitors" and self.monitor_index + 1 < self.monitor_count:
+        if self.screen_stage and self.monitor_index + 1 < self.monitor_count:
             self.monitor_index += 1
             return True
-        if self.index + 1 >= len(STAGES):
+        if self.index + 1 >= self.total_steps:
             return False
         self.index += 1
-        if STAGES[self.index].key == "monitors":
+        if self.screen_stage:
             self.monitor_index = 0
         return True
 
     def repeat_previous(self) -> None:
-        if self.stage.key == "monitors" and self.monitor_index > 0:
+        if self.screen_stage and self.monitor_index > 0:
             self.monitor_index -= 1
         else:
             self.index = max(0, self.index - 1)
-            if self.stage.key == "monitors":
+            if self.screen_stage:
                 self.monitor_index = self.monitor_count - 1
         self.recording = False
 
     def select_stage(self, index: int) -> None:
-        if not 0 <= index < len(STAGES):
+        if not 0 <= index < self.total_steps:
             raise ValueError("Unknown calibration stage")
         self.cancel_capture()
         self.index = index
         self.monitor_index = 0
 
     def build(self) -> Profile:
+        if self.relative:
+            from .relative_calibration import build_relative
+            return build_relative(self)
         missing = [s.key for s in STAGES if s.key not in self.samples]
         if missing:
             raise CalibrationError("Missing stages: " + ", ".join(missing))

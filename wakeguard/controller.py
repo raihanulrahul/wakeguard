@@ -477,7 +477,8 @@ class App:
         self.state, self.verified = "CALIBRATING", False
         try:
             count = int(self.monitor_count_var.get())
-            self.cal = CalibrationSession(monitor_count=count)
+            glasses_enabled = bool(getattr(self, "glasses_setup_var", None) and self.glasses_setup_var.get())
+            self.cal = CalibrationSession(monitor_count=count, glasses_enabled=glasses_enabled)
         except (ValueError, TypeError) as exc:
             self.state = "PREVIEW"
             self.detail.set(str(exc)); return
@@ -506,7 +507,7 @@ class App:
         self._input_epoch = time.monotonic()
         stage = self.cal.stage
         eye_notice = "Keep your eyes OPEN until you hear Begin. " if stage.eyes in ("closed", "half") else ""
-        text = f"Step {self.cal.index + 1} of {len(STAGES)}. {eye_notice}{stage.instruction} Press space when ready."
+        text = f"Step {self.cal.index + 1} of {self.cal.total_steps}. {eye_notice}{stage.instruction} Press space when ready."
         self.cal_text.set(text)
         self.status.set(self.cal.label + " · INSTRUCTION")
         self.detail.set("SPACE skips this instruction and starts the countdown. R retries; B goes back, including during speech.")
@@ -567,15 +568,15 @@ class App:
             return
         self._navigate_setup("r")
         dialog = tk.Toplevel(self.root); dialog.title("Repeat a calibration stage"); dialog.attributes("-topmost", True)
-        selected = tk.StringVar(value=STAGES[self.cal.index].key)
-        ttk.Combobox(dialog, textvariable=selected, values=[s.key for s in STAGES], state="readonly", width=30).pack(padx=15, pady=15)
+        selected = tk.StringVar(value=self.cal.stage.key)
+        ttk.Combobox(dialog, textvariable=selected, values=[s.key for s in self.cal.stages], state="readonly", width=30).pack(padx=15, pady=15)
         def go():
             if self.state != "CALIBRATING" or self.cal is None:
                 dialog.destroy(); return
             if self.speech_role == "recovery" and self.speech.busy:
                 return
             self._cancel_speech()
-            self.cal.select_stage([s.key for s in STAGES].index(selected.get()))
+            self.cal.select_stage([s.key for s in self.cal.stages].index(selected.get()))
             dialog.destroy(); self.root.focus_set(); self._prompt_stage(brief=True)
         ttk.Button(dialog, text="Repeat selected stage", command=go).pack(pady=10)
 

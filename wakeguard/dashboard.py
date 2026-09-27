@@ -41,6 +41,8 @@ def next_step(app, now=None):
             return NextStep(index, "Return to eyes open", "The short recovery cue finishes before another recording can begin.", "Finishing eye cue…", "none", True)
         if app.cal_phase == "REVIEW" or app.speech_role == "review":
             okay = app.cal_good if app.state == "CALIBRATING" else True
+            if getattr(app, "capture_limited", False):
+                return NextStep(index, "Eye setup kept; support unavailable", "This optional channel could not be measured. Continue without it or repeat the take.", "Continue with limitation", "space")
             return NextStep(index, "Sample accepted" if okay else "This sample needs a repeat",
                             "Continue when ready. Earlier accepted samples are kept." if okay else "Read the measurement reason below; adjust the view, then repeat.",
                             "Accept & continue" if okay else "Repeat this take", "space" if okay else "r")
@@ -49,11 +51,16 @@ def next_step(app, now=None):
         return NextStep(index, "Follow the current instruction", "Already know the posture? Continue skips long narration, but retains the countdown.", "I'm ready  ·  Space", "space")
     if not (app.latest and app.latest.camera_ok and 0 <= now - app.latest.t <= .8):
         return NextStep(1, "Let’s check your camera", "Start the preview. Look at your normal work screen, not the webcam.", "Start camera preview", "preview")
+    target = app.latest.diagnostics.get("target_status", "locked")
+    if target != "locked":
+        return NextStep(1, "Keep tracking on you", "Wait briefly for the GREEN box, or click your face in Preview. Other people must not provide your eye measurements.", "Select your face in preview", "target")
     if not app.audio_confirmed:
         return NextStep(2, "Check spoken guidance", "You need to hear the instructions while your eyes are partly or fully closed.",
                         "Testing speech…" if app.speech.busy else "Test spoken instructions", "speech", app.speech.busy)
     if app.profile is None:
         return NextStep(3, "Make it personal", "Choose how many screens you use, then build your eye and posture references.", "Begin guided calibration", "calibrate")
+    if getattr(app, "glasses_setup_var", None) is not None and app.glasses_setup_var.get() and not app.profile.glasses_info().get("enabled"):
+        return NextStep(3, "Add your glasses profile", "Calibration was collected without glasses support. Re-run once: start without glasses, then the final two short steps add your glasses-on views.", "Recalibrate with glasses", "calibrate")
     if not app.verified:
         return NextStep(4, "Check today’s setup", "Your saved calibration is reusable. Verify this camera position before starting.", "Verify my posture", "verify")
     if not app.screen_test_done:
@@ -130,6 +137,9 @@ class Dashboard:
         a.backend = tk.StringVar(value=a.settings["backend"])
         a.voice_enabled = tk.BooleanVar(value=bool(a.settings["voice"]))
         a.monitor_count_var = tk.StringVar(value=str(a.settings["monitor_count"]))
+        a.glasses_setup_var = tk.BooleanVar(value=bool(a.settings.get("glasses_setup", False)))
+        a.glasses_mode_var = tk.StringVar(value=a.settings.get("glasses_mode", "Auto"))
+        a.glasses_status = tk.StringVar(value="Glasses: not configured")
         a.pulse = tk.BooleanVar(value=bool(a.settings.get("alert_pulse", True)))
         a.palette = tk.StringVar(value=a.settings.get("alert_palette", "Red / white"))
         a.boost = tk.BooleanVar(value=bool(a.settings.get("brightness_boost", True)))
@@ -216,6 +226,8 @@ class Dashboard:
         self._label(row, "Screens used for work", 10).pack(side="left")
         ttk.Combobox(row, textvariable=a.monitor_count_var, values=["1", "2", "3"], state="readonly", width=3, style="WG.TCombobox").pack(side="left", padx=8)
         ttk.Checkbutton(row, text="Optional voice commands", variable=a.voice_enabled, style="WG.TCheckbutton").pack(side="left", padx=8)
+        ttk.Checkbutton(inner, text="I use glasses at this desk · adds two short eye-reference steps at the end",
+                        variable=a.glasses_setup_var, style="WG.TCheckbutton", command=a.save_glasses_preferences).pack(anchor="w", pady=(8,0))
         card, inner = self._card(page, 16); card.pack(fill="x", padx=22, pady=(0, 14))
         self._label(inner, "Current instruction", 13, True).pack(anchor="w")
         self.instruction_label = self._label(inner, "", 11, textvariable=a.cal_text, wraplength=650)
@@ -242,6 +254,13 @@ class Dashboard:
         ttk.Combobox(row, textvariable=a.mode, values=list(MODES), state="readonly", width=15, style="WG.TCombobox").pack(side="left", padx=12)
         self._button(row, "START", a.start_monitoring, "Primary.WG.TButton").pack(side="left", padx=6)
         self._button(row, "Leaving seat", a.leaving_seat).pack(side="left")
+        grow = tk.Frame(inner, bg=CARD); grow.pack(fill="x", pady=(0,10))
+        self._label(grow, "Glasses", 10).pack(side="left")
+        self.glasses_combo = ttk.Combobox(grow, textvariable=a.glasses_mode_var, values=["Auto", "On", "Off"],
+                                           state="readonly", width=8, style="WG.TCombobox")
+        self.glasses_combo.pack(side="left", padx=(12,8))
+        self._label(grow, "", 9, color=MUTED, textvariable=a.glasses_status, wraplength=430).pack(side="left", fill="x", expand=True)
+        a.glasses_mode_var.trace_add("write", lambda *_: a.save_glasses_preferences())
         self.mode_note = self._label(inner, "", 10, color=MUTED, wraplength=650); self.mode_note.pack(fill="x")
         card, inner = self._card(page); card.pack(fill="x", padx=22, pady=(0, 14))
         self._label(inner, "Measurement status", 13, True).pack(anchor="w")
@@ -349,6 +368,7 @@ class Dashboard:
         elif step.action == "start": a.start_monitoring()
         elif step.action == "stop": a.stop_all()
         elif step.action == "live": self.select("live")
+        elif step.action == "target": self.select("setup")
         self.render()
 
     def choose_screen_only(self):
@@ -366,7 +386,7 @@ class Dashboard:
     def render(self):
         a = self.app
         step = next_step(a)
-        data = (step, a.status.get(), round(a.battery.get()), a.mode.get(), a.cal_text.get())
+        data = (step, a.status.get(), round(a.battery.get()), a.mode.get(), a.cal_text.get(), a.glasses_mode_var.get(), a.glasses_status.get())
         if data != self.cache:
             self.next_title.configure(text=step.title)
             self.next_detail.configure(text=a.cal_text.get() if a.state in ("CALIBRATING", "VERIFYING") else step.detail)
@@ -389,3 +409,10 @@ class Dashboard:
             self.previous_button.pack_forget()
         if hasattr(a, "brightness"):
             self.brightness_text.set(a.brightness.status)
+        o = a.latest
+        if o is not None and hasattr(a, "_channel_limits"):
+            target = o.diagnostics.get("target_status", "")
+            if target and target != "locked" and a.state in ("PREVIEW", "CALIBRATING"):
+                self.state_badge.configure(text="TARGET " + target.upper() + " — check GREEN box")
+            elif target == "locked" and not o.pose_valid() and o.context_valid():
+                self.state_badge.configure(text="Eye context available · head ANGLES unavailable")

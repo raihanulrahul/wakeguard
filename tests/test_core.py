@@ -175,9 +175,9 @@ class ModelTests(unittest.TestCase):
     def test_recline_opposite_motion_not_convicted(self):
         p=demo_profile();o=observation(1,1);o.area=.17;o.cy=.50
         self.assertEqual(p.recline(o),0)
-    def test_failed_pose_is_unknown(self):
+    def test_failed_pose_does_not_erase_independent_recline_geometry(self):
         p=demo_profile();o=observation(1,1);o.pitch=None
-        self.assertEqual(p.eye_ratios(o),[]);self.assertIsNone(p.recline(o))
+        self.assertEqual(p.eye_ratios(o),[]);self.assertEqual(p.recline(o),0)
 
 
 def full_calibration():

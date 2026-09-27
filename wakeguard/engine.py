@@ -2,7 +2,8 @@
 from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
-from .model import Observation, Profile, clamp
+from .model import Observation, Profile, clamp, finite
+from .face_context import valid_shape, shape_distance
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,9 @@ class Decision:
     auto_cleared: bool = False
     learning: bool = False
     fresh: bool = False
+    glasses_state: str = "off"
+    glasses_confidence: float = 1.0
+    activity: bool = False
 
 
 class Engine:
@@ -56,6 +60,15 @@ class Engine:
         self.manual_away = False
         self.manual_away_since = 0.0
         self.manual_away_departed = False
+        self.glasses_mode = "Auto"
+        self.glasses_state = "off"
+        self.glasses_confidence = 1.0
+        self._glasses_candidate = None
+        self._glasses_candidate_since = 0.0
+        self._glasses_last_confident = -float("inf")
+        self.activity_motion: deque[tuple[float, float, float]] = deque(maxlen=90)
+        self.context_motion: deque[tuple[float, float]] = deque(maxlen=90)
+        self._last_shape = None
 
     def dwell(self, name: str, condition: bool, now: float) -> float:
         if not condition:
@@ -73,9 +86,38 @@ class Engine:
         self.manual_away = True
         self.manual_away_since = now
         self.manual_away_departed = False
+        self.activity_motion.clear()
+        self.context_motion.clear()
+        self._last_shape = None
         self.active = False
         self.battery = 0
         self.timers.clear()
+
+    def _resolve_glasses(self, o: Observation, now: float) -> tuple[str, float]:
+        info = self.profile.glasses_info()
+        if not info.get("enabled"):
+            self.glasses_state, self.glasses_confidence = "off", 1.0
+            return self.glasses_state, self.glasses_confidence
+        mode = self.glasses_mode if self.glasses_mode in ("Auto", "On", "Off") else "Auto"
+        if mode in ("On", "Off"):
+            self.glasses_state = mode.lower()
+            self.glasses_confidence = 1.0
+            self._glasses_candidate = None
+            return self.glasses_state, self.glasses_confidence
+        raw, confidence = self.profile.classify_glasses(o)
+        self.glasses_confidence = confidence
+        if raw in ("on", "off"):
+            if raw != self._glasses_candidate:
+                self._glasses_candidate = raw
+                self._glasses_candidate_since = now
+            if now - self._glasses_candidate_since >= .7:
+                self.glasses_state = raw
+                self._glasses_last_confident = now
+        else:
+            self._glasses_candidate = None
+            if now - self._glasses_last_confident > 3.0:
+                self.glasses_state = "uncertain"
+        return self.glasses_state, confidence
 
     def update(self, o: Observation, now: float, input_age: float | None = None) -> Decision:
         cfg = MODES[self.mode]
@@ -104,7 +146,8 @@ class Engine:
         own_display_light = now < self.display_light_until
         changed_light = fresh and not own_display_light and abs(o.brightness - self.profile.brightness) > 65 and not self.active and now - self.last_alarm > 5
         light_for = self.dwell("light_changed", changed_light, now)
-        eye_values = self.profile.eye_ratios(o, self.adaptation) if fresh and not changed_camera else []
+        glasses_state, glasses_confidence = self._resolve_glasses(o, now) if fresh and not changed_camera else ("uncertain", 0.0)
+        eye_values = self.profile.eye_ratios(o, self.adaptation, glasses_state=glasses_state) if fresh and not changed_camera else []
         eye = min(eye_values) if eye_values else None
         recline = self.profile.recline(o) if fresh else None
         down = self.profile.neck(o) if fresh else None
@@ -112,15 +155,36 @@ class Engine:
         neck = max(down or 0, up or 0) if down is not None or up is not None else None
         if new_frame and fresh and o.face and o.cx is not None and o.cy is not None:
             self.motion.append((now, o.cx, o.cy))
+            if valid_shape(o.shape):
+                if self._last_shape is not None:
+                    self.context_motion.append((now, shape_distance(o.shape, self._last_shape)))
+                self._last_shape = list(o.shape)
+            if finite(o.body_activity) or finite(o.hand_activity):
+                self.activity_motion.append((now, float(o.body_activity or 0), float(o.hand_activity or 0)))
         while self.motion and now - self.motion[0][0] > 4:
             self.motion.popleft()
+        while self.context_motion and now - self.context_motion[0][0] > 3:
+            self.context_motion.popleft()
+        while self.activity_motion and now - self.activity_motion[0][0] > 3:
+            self.activity_motion.popleft()
         still = (len(self.motion) >= 8 and self.motion[-1][0] - self.motion[0][0] >= 2
                  and max(x[1] for x in self.motion) - min(x[1] for x in self.motion) < .008
                  and max(x[2] for x in self.motion) - min(x[2] for x in self.motion) < .008)
+        head_activity = any(value >= .18 for _, value in self.context_motion)
+        body_activity = any(body >= .025 or hand >= .05 for _, body, hand in self.activity_motion)
+        input_activity = input_age is not None and input_age < 3
+        awake_activity = head_activity or body_activity or input_activity
         closed_for = self.dwell("closed", fresh and eye is not None and eye < .25, now)
         partial_for = self.dwell("partial", fresh and eye is not None and eye < self.profile.partial_limit(o), now)
-        unknown = camera_fault or changed_camera or (not empty and (not o.face or eye is None))
+        unknown = camera_fault or changed_camera or (not empty and (not o.face or eye is None or (cfg.no_recline and recline is None)))
         unknown_for = self.dwell("unknown", unknown, now)
+        glasses_obscured = glasses_state in ("on", "uncertain") and fresh and o.face and eye is None
+        unknown_limit = (1.2 if camera_fault else cfg.unknown_s)
+        if glasses_obscured and not camera_fault:
+            if awake_activity:
+                unknown_limit *= 1.6
+            if still or (neck is not None and neck >= .55) or (recline is not None and recline >= .55):
+                unknown_limit *= .70
         recline_for = self.dwell("recline", fresh and recline is not None and recline >= .68, now)
         neck_concern = (fresh and neck is not None and neck >= .75
                         and (eye is None or eye < .8 or (still and input_age is not None and input_age > 15)))
@@ -134,17 +198,32 @@ class Engine:
             reasons.append("Super Alert: recline forbidden")
         if neck_for >= (2.5 if self.mode == "Normal" else 1.5):
             reasons.append("Calibrated neck tilt with reduced alertness cues")
-        if unknown_for >= (1.2 if camera_fault else cfg.unknown_s):
-            reasons.append("Camera stopped/stale" if camera_fault else "Eyes/face unobservable: check camera or posture")
+        if unknown_for >= unknown_limit:
+            if camera_fault:
+                reasons.append("Camera stopped/stale")
+            elif glasses_obscured:
+                reasons.append("Eyes obscured/uncertain behind glasses; posture/activity cannot confirm alertness")
+            else:
+                reasons.append("Eyes/face unobservable: check camera or posture")
         if changed_camera:
             reasons.append("Camera/resolution changed: recalibrate")
         if light_for >= 5:
             reasons.append("Lighting changed substantially: recheck calibration")
 
-        score = (1 - clamp(eye)) * 55 if eye is not None else 35
-        score += (recline or 0) * (20 if self.mode == "Normal" else 28)
-        score += (neck or 0) * 15 + (8 if still else 0)
-        score += 4 if input_age is not None and input_age > 30 else 0
+        if eye is not None:
+            score = (1 - clamp(eye)) * 55
+            score += (recline or 0) * (20 if self.mode == "Normal" else 28)
+            score += (neck or 0) * 15 + (8 if still else 0)
+        elif glasses_obscured:
+            # When lenses hide the eyelids, posture and target-associated motion
+            # carry more weight. Movement is positive awake evidence; lack of
+            # movement alone is never treated as proof of sleep.
+            score = 30 + (recline or 0) * (30 if self.mode == "Normal" else 38)
+            score += (neck or 0) * 24 + (12 if still else 0)
+            score -= 12 if awake_activity else 0
+        else:
+            score = 35 + (recline or 0) * (20 if self.mode == "Normal" else 28) + (neck or 0) * 15 + (8 if still else 0)
+        score += 6 if input_age is not None and input_age > 30 else 0
         if fresh and eye is not None and eye >= .85 and not neck_concern:
             self.battery -= 24 * dt
         elif score > 35:
@@ -159,7 +238,7 @@ class Engine:
             if now >= self.quiet_until:
                 self.active = True
                 self.reason = "; ".join(reasons)
-        hard_recline = cfg.no_recline and recline is not None and recline >= .68
+        hard_recline = cfg.no_recline and (recline is None or recline >= .68)
         recovered = (self.active and fresh and eye is not None and eye >= .80
                      and not hard_recline and not changed_camera)
         recovery_for = self.dwell("recovered", recovered, now)
@@ -171,7 +250,7 @@ class Engine:
             self.timers.pop("recovered", None)
             auto = True
 
-        learning_candidate = (cfg.learning and not own_display_light and fresh and not self.active and not reasons
+        learning_candidate = (cfg.learning and glasses_state == "off" and not own_display_light and fresh and not self.active and not reasons
                               and self.battery < 15 and eye is not None and .9 <= eye <= 1.15
                               and (recline or 0) < .25 and (neck or 0) < .25
                               and input_age is not None and input_age < 10
@@ -201,4 +280,4 @@ class Engine:
         else:
             status = "MONITORING"
         return Decision(status, self.battery, self.active, [self.reason] if self.active else reasons,
-                        eye, recline, neck, auto, learning, fresh)
+                        eye, recline, neck, auto, learning, fresh, glasses_state, glasses_confidence, awake_activity)
