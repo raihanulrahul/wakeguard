@@ -1,0 +1,20 @@
+name: Source-only QA snapshot
+on:
+  push:
+    branches: ['fix/calibration-capture-and-interrupts']
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive committed source only
+        run: git archive --format=zip --output=wakeguard-source.zip HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wakeguard-source-${{ github.sha }}
+          path: wakeguard-source.zip
+          retention-days: 3
