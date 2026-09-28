@@ -186,14 +186,17 @@ class Dashboard:
         self.root.bind("<Button-4>", lambda e: self._wheel(e, -3), add="+")
         self.root.bind("<Button-5>", lambda e: self._wheel(e, 3), add="+")
         top = tk.Frame(self.control_area, bg=BG); top.pack(fill="x", padx=22, pady=(10, 6))
+        self.heading_area = top
         self.heading = self._label(top, "Stay Alert", 20, True, bg=BG); self.heading.pack(anchor="w")
         self.subtitle = self._label(top, "Look awake, keep your KPI", 10, color=MUTED, bg=BG)
         self.subtitle.pack(anchor="w", pady=(4, 0))
         rail = tk.Frame(self.control_area, bg=BG); rail.pack(fill="x", padx=22, pady=(0, 6))
+        self.setup_rail = rail
         for i, name in enumerate(("Camera", "Audio", "Calibrate", "Verify", "Alerts"), 1):
             badge = self._label(rail, f"{i}  {name}", 9, True, MUTED, "#e5ebf3", padx=10, pady=7)
             badge.pack(side="left", padx=(0, 5)); self.checks.append(badge)
         card, hero = self._card(self.control_area, 12)
+        self.hero_card = card
         card.pack(fill="x", padx=22, pady=(0, 8))
         self.hero = hero
         self._label(hero, "YOUR NEXT STEP", 9, True, ACCENT).pack(anchor="w")
@@ -309,6 +312,13 @@ class Dashboard:
         a = self.app
         session = a.cal if a.cal is not None else getattr(a, "draft", None)
         active = a.state == "CALIBRATING" and a.cal is not None
+        # During capture the detailed progress replaces the general setup rail.
+        # Keep enough height for the actual checklist on 768px office screens.
+        self.heading_area.pack_forget(); self.setup_rail.pack_forget()
+        if not active:
+            self.heading_area.pack(fill="x", padx=22, pady=(10, 6), before=self.hero_card)
+            self.setup_rail.pack(fill="x", padx=22, pady=(0, 6), before=self.hero_card)
+        self.hero_card.pack_configure(pady=(8 if active else 0, 8))
         for widget in (self.setup_choices, self.session_summary, self.progress_area, self.add_glasses_button):
             widget.pack_forget()
         if self.page == "setup" and session is None and a.state not in ("MONITORING", "VERIFYING"):
@@ -322,18 +332,23 @@ class Dashboard:
         tasks = session.capture_tasks()
         statuses = [session.capture_status(*task) for task in tasks]
         count = sum(session.complete(*task) for task in tasks)
-        self.progress_text.configure(text=f"{count} of {len(tasks)} captures saved" + (" · paused" if not active else ""))
+        self.progress_text.configure(text=f"{count} of {len(tasks)} captures saved locally" + (" · paused" if not active else ""))
         self.cal_progress.configure(value=100*count/max(1, len(tasks)))
         self.save_note.configure(text=getattr(a, "draft_save_error", "") or "Saved locally after each capture · Stop / Quit keeps progress",
                                  fg=RED if getattr(a, "draft_save_error", "") else MUTED)
+        self.save_note.pack_forget()
+        if getattr(a, "draft_save_error", "") or not active:
+            self.save_note.pack(fill="x", pady=(3, 0))
         self.take_progress.pack_forget(); self.take_label.pack_forget()
         if active and a.cal_phase == "CAPTURE":
-            fraction = min(session.valid_seconds / session.required_seconds, len(session.current) / session.required_frames, 1)
+            elapsed = max(0, time.monotonic() - session.started) if session.started is not None else 0
+            fraction = min(elapsed / session.stage.seconds, session.valid_seconds / session.required_seconds,
+                           len(session.current) / session.required_frames, 1)
             self.take_progress.configure(value=100*fraction)
-            self.take_progress.pack(fill="x", before=self.save_note, pady=(5, 0))
+            self.take_progress.pack(fill="x", pady=(5, 0))
             self.take_label.configure(text=f"This take: {session.valid_seconds:.1f} / {session.required_seconds:.1f}s usable · {session.latest_issue or 'collecting'}")
-            self.take_label.pack(fill="x", before=self.save_note)
-        if active and not session.glasses_enabled:
+            self.take_label.pack(fill="x")
+        if active and not session.glasses_enabled and a.cal_phase != "CAPTURE":
             self.add_glasses_button.pack(anchor="w", pady=(4, 0))
             self.add_glasses_button.configure(state="normal" if a.cal_phase in ("READY", "REVIEW") and not a.speech.busy else "disabled")
         self.capture_card.pack(fill="x", padx=22, pady=(0, 8), before=self.preview_card)

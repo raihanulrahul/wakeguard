@@ -215,6 +215,17 @@ class RecoveryGUITests(unittest.TestCase):
         self.assertFalse(a.glasses_setup_var.get())
         self.assertFalse(a.cal.glasses_enabled)
 
+    def test_active_calibration_keeps_checklist_and_retry_control_visible(self):
+        a=self.setup_session(); self.root.geometry('944x668')
+        a.cal.issues['closed_main:1']='Retry Monitor 2'
+        a.cal_text.set('Monitor 2 · Eyes closed needs a retry. Other saved captures are kept.')
+        a.cal_good=False
+        a.view.render(); self.root.update()
+        bottom=self.root.winfo_rooty()+self.root.winfo_height()-64
+        self.assertGreater(a.view.canvas.winfo_height(),170)
+        self.assertLess(a.view.repeat_selected.winfo_rooty()+a.view.repeat_selected.winfo_height(),bottom)
+        self.assertLess(a.view.capture_list.winfo_rooty()+60,bottom)
+
     def test_explicit_late_addition_keeps_completed_samples(self):
         a=self.setup_session(); saved=list(a.cal.monitor_samples[1])
         a.add_glasses_steps()
