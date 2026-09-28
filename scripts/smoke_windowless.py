@@ -21,14 +21,35 @@ def child(repository: Path, output: Path) -> None:
     def initialize(self, *args, **kwargs):
         original(self, *args, **kwargs)
         def capture_and_close():
+            def snapshot(name):
+                self.view.render()
+                self.root.update()
+                x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
+                image = ImageGrab.grab(bbox=(x, y, x + self.root.winfo_width(), y + self.root.winfo_height()))
+                image.save(output / ('wakeguard-' + name + '.png'))
             try:
                 for page in ('setup', 'alerts', 'live'):
                     self.view.select(page)
-                    self.view.render()
-                    self.root.update()
-                    x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
-                    image = ImageGrab.grab(bbox=(x, y, x + self.root.winfo_width(), y + self.root.winfo_height()))
-                    image.save(output / ('wakeguard-' + page + '.png'))
+                    snapshot(page)
+                # Real desktop widgets with synthetic measurements, including the
+                # user's failed-monitor recovery path at a narrow laptop size.
+                sys.path.insert(0, str(repository / 'tests'))
+                from test_glasses_natural_050 import natural_session
+                self.root.geometry('944x668')
+                self.view.select('setup')
+                snapshot('setup-small')
+                self.audio_confirmed = True
+                self.state = 'CALIBRATING'
+                self.cal = natural_session(2)
+                self.cal.guided_pairs = True
+                self.cal.closed_monitor_samples[1] = self.cal.monitor_samples[1]
+                self._finish_calibration()
+                snapshot('monitor-2-retry')
+                self.repeat_capture('closed_main', 1)
+                self._cancel_speech()
+                self.cal_phase = 'PROMPT'
+                self._capture_begin()
+                snapshot('capture-progress')
                 (output / 'launcher-receipt.json').write_text(json.dumps({
                     'executable': sys.executable, 'worker_executable': worker_python(),
                     'version': __version__, 'real_gui': True, 'demo_only': True

@@ -35,17 +35,19 @@ def next_step(app, now=None):
         index = 3 if app.state == "CALIBRATING" else 4
         if app.cal_phase == "AUDIO FAILED" or not app.audio_confirmed:
             return NextStep(index, "Audio needs attention", "Stop setup, check your sound output, then test speech again.", "Stop setup", "stop")
+        if getattr(app, "cal_save_failed", False):
+            return NextStep(index, "Captures complete · save needs attention", app.cal_text.get(), "Try saving again", "save_calibration")
         if app.cal_phase == "CAPTURE":
-            return NextStep(index, "Collecting your sample", "Hold the requested posture. Repeat or Previous cancels only this take.", "Capturing…", "none", True)
+            return NextStep(index, "Collecting your sample", "Move naturally within this view. Repeat or Previous cancels only this take.", "Capturing…", "none", True)
         if app.speech_role == "recovery":
             return NextStep(index, "Return to eyes open", "The short recovery cue finishes before another recording can begin.", "Finishing eye cue…", "none", True)
         if app.cal_phase == "REVIEW" or app.speech_role == "review":
             okay = app.cal_good if app.state == "CALIBRATING" else True
             if getattr(app, "capture_limited", False):
                 return NextStep(index, "Eye setup kept; support unavailable", "This optional channel could not be measured. Continue without it or repeat the take.", "Continue with limitation", "space")
-            return NextStep(index, "Sample accepted" if okay else "This sample needs a repeat",
+            return NextStep(index, "Capture saved" if okay else "Retry needed · other captures kept",
                             "Continue when ready. Earlier accepted samples are kept." if okay else "Read the measurement reason below; adjust the view, then repeat.",
-                            "Accept & continue" if okay else "Repeat this take", "space" if okay else "r")
+                            "Continue  ·  Space" if okay else "Retry this capture", "space" if okay else "r")
         if app.speech_role == "countdown":
             return NextStep(index, "Get ready for capture", "The short countdown marks exactly when recording starts.", "Countdown…", "none", True)
         return NextStep(index, "Follow the current instruction", "Already know the posture? Continue skips long narration, but retains the countdown.", "I'm ready  ·  Space", "space")
@@ -57,6 +59,8 @@ def next_step(app, now=None):
     if not app.audio_confirmed:
         return NextStep(2, "Check spoken guidance", "You need to hear the instructions while your eyes are partly or fully closed.",
                         "Testing speech…" if app.speech.busy else "Test spoken instructions", "speech", app.speech.busy)
+    if getattr(app, "draft", None) is not None:
+        return NextStep(3, "Continue your saved calibration", "Completed captures are kept. Resume with the same camera position and lighting.", "Resume calibration", "calibrate")
     if app.profile is None:
         return NextStep(3, "Make it personal", "Choose how many screens you use, then build your eye and posture references.", "Begin guided calibration", "calibrate")
     if getattr(app, "glasses_setup_var", None) is not None and app.glasses_setup_var.get() and not app.profile.glasses_info().get("enabled"):
@@ -167,8 +171,11 @@ class Dashboard:
             button.pack(fill="x", padx=8, pady=3)
             self.navigation[name] = button
         self._label(sidebar, "No video saved.\nNo PC alarm sound.\nYou stay in control.", 9, False, "#7f96b4", NAVY, wraplength=133).pack(side="bottom", anchor="w", padx=20, pady=24)
-        self.canvas = tk.Canvas(body, bg=BG, highlightthickness=0)
-        scroll = ttk.Scrollbar(body, orient="vertical", command=self.canvas.yview)
+        right = tk.Frame(body, bg=BG); right.pack(fill="both", expand=True)
+        self.control_area = tk.Frame(right, bg=BG); self.control_area.pack(fill="x")
+        scroll_area = tk.Frame(right, bg=BG); scroll_area.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(scroll_area, bg=BG, highlightthickness=0)
+        scroll = ttk.Scrollbar(scroll_area, orient="vertical", command=self.canvas.yview)
         scroll.pack(side="right", fill="y"); self.canvas.pack(fill="both", expand=True)
         self.canvas.configure(yscrollcommand=scroll.set)
         self.workspace = tk.Frame(self.canvas, bg=BG)
@@ -178,26 +185,55 @@ class Dashboard:
         self.root.bind("<MouseWheel>", self._wheel, add="+")
         self.root.bind("<Button-4>", lambda e: self._wheel(e, -3), add="+")
         self.root.bind("<Button-5>", lambda e: self._wheel(e, 3), add="+")
-        top = tk.Frame(self.workspace, bg=BG); top.pack(fill="x", padx=22, pady=(18, 12))
+        top = tk.Frame(self.control_area, bg=BG); top.pack(fill="x", padx=22, pady=(10, 6))
         self.heading = self._label(top, "Stay Alert", 20, True, bg=BG); self.heading.pack(anchor="w")
         self.subtitle = self._label(top, "Look awake, keep your KPI", 10, color=MUTED, bg=BG)
         self.subtitle.pack(anchor="w", pady=(4, 0))
-        rail = tk.Frame(self.workspace, bg=BG); rail.pack(fill="x", padx=22, pady=(0, 12))
+        rail = tk.Frame(self.control_area, bg=BG); rail.pack(fill="x", padx=22, pady=(0, 6))
         for i, name in enumerate(("Camera", "Audio", "Calibrate", "Verify", "Alerts"), 1):
             badge = self._label(rail, f"{i}  {name}", 9, True, MUTED, "#e5ebf3", padx=10, pady=7)
             badge.pack(side="left", padx=(0, 5)); self.checks.append(badge)
-        card, hero = self._card(self.workspace)
-        card.pack(fill="x", padx=22, pady=(0, 14))
+        card, hero = self._card(self.control_area, 12)
+        card.pack(fill="x", padx=22, pady=(0, 8))
+        self.hero = hero
         self._label(hero, "YOUR NEXT STEP", 9, True, ACCENT).pack(anchor="w")
         self.next_title = self._label(hero, "Let’s check your camera", 16, True); self.next_title.pack(fill="x", pady=(5, 3))
         self.next_detail = self._label(hero, "", 10, color=MUTED, wraplength=620); self.next_detail.pack(fill="x")
-        actionrow = tk.Frame(hero, bg=CARD); actionrow.pack(fill="x", pady=(12, 0))
+        self.setup_choices = tk.Frame(hero, bg=CARD)
+        self._label(self.setup_choices, "BEFORE YOU BEGIN", 9, True, ACCENT).pack(anchor="w", pady=(8, 3))
+        row = tk.Frame(self.setup_choices, bg=CARD); row.pack(fill="x")
+        self._label(row, "Work monitors", 10).pack(side="left")
+        self.screen_count = ttk.Combobox(row, textvariable=a.monitor_count_var, values=["1", "2", "3"],
+                                        state="readonly", width=3, style="WG.TCombobox")
+        self.screen_count.pack(side="left", padx=(8, 18))
+        self.glasses_check = ttk.Checkbutton(row, text="I wear glasses at this desk", variable=a.glasses_setup_var,
+                                             style="WG.TCheckbutton", command=a.save_glasses_preferences)
+        self.glasses_check.pack(side="left")
+        self.setup_hint = self._label(self.setup_choices, "Start with glasses OFF. If selected, short glasses-ON pairs follow at the end.",
+                                     9, color=MUTED, wraplength=600)
+        self.setup_hint.pack(fill="x", pady=(3, 0))
+        self.session_summary = self._label(hero, "", 9, color=MUTED)
+        self.progress_area = tk.Frame(hero, bg=CARD)
+        self.progress_text = self._label(self.progress_area, "", 10, True)
+        self.progress_text.pack(fill="x", pady=(7, 3))
+        self.cal_progress = ttk.Progressbar(self.progress_area, maximum=100, style="WG.Horizontal.TProgressbar")
+        self.cal_progress.pack(fill="x")
+        self.take_progress = ttk.Progressbar(self.progress_area, maximum=100, style="WG.Horizontal.TProgressbar")
+        self.take_label = self._label(self.progress_area, "", 9, color=MUTED)
+        self.save_note = self._label(self.progress_area, "", 9, color=MUTED, wraplength=620)
+        self.save_note.pack(fill="x", pady=(3, 0))
+        actionrow = tk.Frame(hero, bg=CARD); actionrow.pack(fill="x", pady=(8, 0))
+        self.actionrow = actionrow
         self.next_button = self._button(actionrow, "Start camera preview", self.advance, "Primary.WG.TButton")
         self.next_button.pack(side="left")
         self.repeat_button = self._button(actionrow, "Repeat", lambda: a.action("r"))
         self.previous_button = self._button(actionrow, "Previous", lambda: a.action("b"))
-        self.state_badge = self._label(actionrow, "", 9, True, MUTED, CARD, wraplength=320)
-        self.state_badge.pack(side="right", padx=10)
+        # Status gets its own row so actions remain visible on a narrow laptop.
+        self.state_badge = self._label(hero, "", 9, True, MUTED, CARD, wraplength=650)
+        self.state_badge.pack(fill="x", pady=(5, 0))
+        self.repair_button = self._button(actionrow, "Repeat monitor pair", a.retry_screen_pair)
+        self.keep_previous_button = self._button(hero, "Keep earlier successful capture", a.keep_previous_capture)
+        self.add_glasses_button = self._button(hero, "Add glasses steps to this calibration", a.add_glasses_steps)
         for name in self.navigation:
             self.pages[name] = tk.Frame(self.workspace, bg=BG)
         self._setup_page(self.pages["setup"])
@@ -208,7 +244,31 @@ class Dashboard:
 
     def _setup_page(self, page):
         a = self.app
+        self.capture_card, inner = self._card(page, 12)
+        self.capture_heading = self._label(inner, "Your calibration captures", 12, True)
+        self.capture_heading.pack(anchor="w", pady=(0, 6))
+        row = tk.Frame(inner, bg=CARD); row.pack(fill="x")
+        self.capture_list = ttk.Treeview(row, columns=("capture", "state"), show="headings", height=5, selectmode="browse")
+        self.capture_list.heading("capture", text="Capture / monitor")
+        self.capture_list.heading("state", text="Status")
+        self.capture_list.column("capture", width=350, minwidth=180)
+        self.capture_list.column("state", width=150, minwidth=140, stretch=False)
+        self.capture_list.tag_configure("saved", foreground=ACCENT)
+        self.capture_list.tag_configure("retry", foreground=RED)
+        self.capture_list.tag_configure("limited", foreground="#986513")
+        self.capture_list.pack(side="left", fill="x", expand=True)
+        self.capture_tree_row = row
+        scrollbar = ttk.Scrollbar(row, orient="vertical", command=self.capture_list.yview)
+        scrollbar.pack(side="right", fill="y"); self.capture_list.configure(yscrollcommand=scrollbar.set)
+        row = tk.Frame(inner, bg=CARD); row.pack(fill="x", pady=(6, 0))
+        row.pack_configure(before=self.capture_tree_row, pady=(0, 6))
+        self.repeat_selected = self._button(row, "Repeat selected capture", self.repeat_selected_capture)
+        self.repeat_selected.pack(side="left")
+        self._label(row, "Only the selected capture is repeated.", 9, color=MUTED).pack(side="left", padx=10)
+        self.capture_rows = []
+        self.capture_cache = None
         card, inner = self._card(page, 16); card.pack(fill="x", padx=22, pady=(0, 12))
+        self.preview_card = card
         line = tk.Frame(inner, bg=CARD); line.pack(fill="x")
         self._label(line, "Your view", 13, True).pack(side="left")
         self._label(line, "Use your normal working posture", 9, color=MUTED).pack(side="right")
@@ -222,24 +282,77 @@ class Dashboard:
         ttk.Combobox(row, textvariable=a.backend, values=["auto", "dshow", "msmf"], state="readonly", width=7, style="WG.TCombobox").pack(side="left")
         self._button(row, "Preview", a.preview).pack(side="left", padx=8)
         self._button(row, "Test speech", a.test_speech).pack(side="left")
-        row = tk.Frame(inner, bg=CARD); row.pack(fill="x", pady=(10, 0))
-        self._label(row, "Screens used for work", 10).pack(side="left")
-        ttk.Combobox(row, textvariable=a.monitor_count_var, values=["1", "2", "3"], state="readonly", width=3, style="WG.TCombobox").pack(side="left", padx=8)
-        ttk.Checkbutton(row, text="Optional voice commands", variable=a.voice_enabled, style="WG.TCheckbutton").pack(side="left", padx=8)
-        ttk.Checkbutton(inner, text="I use glasses at this desk · adds two short eye-reference steps at the end",
-                        variable=a.glasses_setup_var, style="WG.TCheckbutton", command=a.save_glasses_preferences).pack(anchor="w", pady=(8,0))
-        card, inner = self._card(page, 16); card.pack(fill="x", padx=22, pady=(0, 14))
-        self._label(inner, "Current instruction", 13, True).pack(anchor="w")
-        self.instruction_label = self._label(inner, "", 11, textvariable=a.cal_text, wraplength=650)
-        self.instruction_label.pack(fill="x", pady=8)
-        self._label(inner, "", 10, color=MUTED, textvariable=a.detail, wraplength=650).pack(fill="x", pady=(0, 8))
-        row = tk.Frame(inner, bg=CARD); row.pack(fill="x")
-        self._button(row, "Ready / Next / ACK", lambda: a.action("space")).pack(side="left")
-        self._button(row, "Choose stage…", a.choose_stage).pack(side="left", padx=6)
-        row = tk.Frame(inner, bg=CARD); row.pack(fill="x", pady=(10, 0))
+        ttk.Checkbutton(inner, text="Optional spoken commands", variable=a.voice_enabled,
+                        style="WG.TCheckbutton").pack(anchor="w", pady=(8, 0))
+        card, inner = self._card(page, 12); card.pack(fill="x", padx=22, pady=(0, 12))
+        self.instruction_label = self._label(inner, "", 10, color=MUTED, textvariable=a.detail, wraplength=650)
+        self.instruction_label.pack(fill="x")
+        row = tk.Frame(inner, bg=CARD); row.pack(fill="x", pady=(8, 0))
         self._button(row, "Calibrate", a.begin_calibration).pack(side="left")
-        self._button(row, "Verify setup", a.begin_verification).pack(side="left", padx=6)
-        self._label(row, "Space: ready  •  R: repeat  •  B: back", 9, color=MUTED).pack(side="right")
+        self._button(row, "Start new calibration…", a.new_calibration).pack(side="left", padx=6)
+        self._button(row, "Verify setup", a.begin_verification).pack(side="left")
+
+    def show_capture_list(self):
+        self.select("setup")
+        self.render()
+        self.canvas.yview_moveto(0)
+        self.capture_list.focus_set()
+
+    def repeat_selected_capture(self):
+        selection = self.capture_list.selection()
+        if selection:
+            index = int(selection[0])
+            if index < len(self.capture_rows):
+                self.app.repeat_capture(*self.capture_rows[index])
+
+    def render_calibration(self):
+        a = self.app
+        session = a.cal if a.cal is not None else getattr(a, "draft", None)
+        active = a.state == "CALIBRATING" and a.cal is not None
+        for widget in (self.setup_choices, self.session_summary, self.progress_area, self.add_glasses_button):
+            widget.pack_forget()
+        if self.page == "setup" and session is None and a.state not in ("MONITORING", "VERIFYING"):
+            self.setup_choices.pack(fill="x", before=self.actionrow)
+        if session is None:
+            self.capture_card.pack_forget()
+            return
+        self.session_summary.configure(text=f"{session.monitor_count} work monitor(s) · Glasses {'included' if session.glasses_enabled else 'not included'} · Setup choices fixed for this session")
+        self.session_summary.pack(fill="x", before=self.actionrow, pady=(6, 0))
+        self.progress_area.pack(fill="x", before=self.actionrow)
+        tasks = session.capture_tasks()
+        statuses = [session.capture_status(*task) for task in tasks]
+        count = sum(session.complete(*task) for task in tasks)
+        self.progress_text.configure(text=f"{count} of {len(tasks)} captures saved" + (" · paused" if not active else ""))
+        self.cal_progress.configure(value=100*count/max(1, len(tasks)))
+        self.save_note.configure(text=getattr(a, "draft_save_error", "") or "Saved locally after each capture · Stop / Quit keeps progress",
+                                 fg=RED if getattr(a, "draft_save_error", "") else MUTED)
+        self.take_progress.pack_forget(); self.take_label.pack_forget()
+        if active and a.cal_phase == "CAPTURE":
+            fraction = min(session.valid_seconds / session.required_seconds, len(session.current) / session.required_frames, 1)
+            self.take_progress.configure(value=100*fraction)
+            self.take_progress.pack(fill="x", before=self.save_note, pady=(5, 0))
+            self.take_label.configure(text=f"This take: {session.valid_seconds:.1f} / {session.required_seconds:.1f}s usable · {session.latest_issue or 'collecting'}")
+            self.take_label.pack(fill="x", before=self.save_note)
+        if active and not session.glasses_enabled:
+            self.add_glasses_button.pack(anchor="w", pady=(4, 0))
+            self.add_glasses_button.configure(state="normal" if a.cal_phase in ("READY", "REVIEW") and not a.speech.busy else "disabled")
+        self.capture_card.pack(fill="x", padx=22, pady=(0, 8), before=self.preview_card)
+        self.repeat_selected.configure(state="normal" if active else "disabled")
+        signature = (tuple(tasks), tuple(statuses), session.capture_position(), active, a.cal_phase)
+        if signature != self.capture_cache:
+            selection = self.capture_list.selection()
+            selected = selection[0] if selection else None
+            self.capture_list.delete(*self.capture_list.get_children())
+            self.capture_rows = tasks
+            for i, (task, status) in enumerate(zip(tasks, statuses)):
+                current = active and task == session.capture_position()
+                label = session.capture_title(*task)
+                tag = "retry" if status == "Retry needed" else "limited" if status.startswith("Limited") else "saved" if status == "Saved" else ""
+                self.capture_list.insert("", "end", iid=str(i), values=(("→ " if current else "") + label, status), tags=(tag,))
+            current_index = tasks.index(session.capture_position())
+            self.capture_list.selection_set(selected if selected in self.capture_list.get_children() else str(current_index))
+            self.capture_list.see(str(current_index))
+            self.capture_cache = signature
 
     def _live_page(self, page):
         a = self.app
@@ -319,6 +432,9 @@ class Dashboard:
         width = max(300, event.width - 90)
         self.next_detail.configure(wraplength=width)
         self.instruction_label.configure(wraplength=width)
+        self.setup_hint.configure(wraplength=width)
+        self.save_note.configure(wraplength=width)
+        self.state_badge.configure(wraplength=width)
 
     def _wheel(self, event, amount=None):
         try:
@@ -360,6 +476,7 @@ class Dashboard:
         elif step.action == "speech": a.test_speech()
         elif step.action == "calibrate": a.begin_calibration()
         elif step.action == "verify": a.begin_verification()
+        elif step.action == "save_calibration": a._finish_calibration()
         elif step.action in ("space", "r"): a.action(step.action)
         elif step.action == "screen": self.select("alerts"); a.test_screen()
         elif step.action == "phone": self.select("alerts"); a.connect_phone()
@@ -386,6 +503,7 @@ class Dashboard:
     def render(self):
         a = self.app
         step = next_step(a)
+        self.render_calibration()
         data = (step, a.status.get(), round(a.battery.get()), a.mode.get(), a.cal_text.get(), a.glasses_mode_var.get(), a.glasses_status.get())
         if data != self.cache:
             self.next_title.configure(text=step.title)
@@ -401,9 +519,17 @@ class Dashboard:
                      "Super Alert": "Super Alert: full recline is forbidden. Open eyes alone do not cancel that condition."}
             self.mode_note.configure(text=notes.get(a.mode.get(), notes["Normal"]))
             self.cache = data
+        self.repair_button.pack_forget()
+        self.keep_previous_button.pack_forget()
         if a.state in ("CALIBRATING", "VERIFYING"):
             self.repeat_button.pack(side="left", padx=6)
             self.previous_button.pack(side="left")
+            if getattr(a, "repair_targets", []) and not a.cal_good and a.cal_phase == "REVIEW":
+                self.repeat_button.pack_forget()
+                self.previous_button.pack_forget()
+                self.repair_button.pack(side="left", padx=6)
+            if a.cal is not None and a.cal_phase == "REVIEW" and a.cal.capture_id(*a.cal.capture_position()) in a.cal.retained_previous:
+                self.keep_previous_button.pack(anchor="w", pady=(4, 0))
         else:
             self.repeat_button.pack_forget()
             self.previous_button.pack_forget()

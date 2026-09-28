@@ -21,3 +21,5 @@ Thumbs.db
 .bootstrap/
 
 .wakeguard-package.json
+
+calibration-draft-*.json

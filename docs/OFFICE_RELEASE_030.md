@@ -19,3 +19,10 @@ Installer SHA-256:
 55d450303aff3c8129f018cbd585aa8c5cbe914fa467cff73291084f65195594
 
 This report follows the tested revision without changing application or installer code.
+
+
+## 0.5.1 calibration recovery and progress
+
+The glasses/screen choices and calibration instructions/actions are now in the fixed top card. Per-monitor open/closed pairs are collected consecutively and validated immediately. The checklist identifies every actual capture and its saved/retry/limited state. Targeted retries skip completed captures. Failed replacement takes preserve the prior successful sample. Local numeric drafts support Stop/Quit/relaunch/resume, with camera identity checks and an explicit unchanged-placement confirmation. Late glasses enrollment appends references without discarding base captures. Final disk-write failures offer saving again without recapture.
+
+Local Linux QA: full suite on a private Python 3.12 environment and an isolated virtual Tk display; actual setup, capture and Monitor 2 retry windows inspected at 944×668. Windows CI evidence is recorded below after the candidate passes. No physical camera, glasses recognition, microphone, phone delivery or display-brightness behavior is claimed by these checks.

@@ -296,6 +296,8 @@ class App:
             eyes = self.cal.stage.eyes
             cue = {"open": "Keep eyes normally open. ", "half": "Half-close your eyes after Begin. ",
                    "closed": "Close your eyes after Begin. ", "absent": "Leave the chair after Begin. "}[eyes]
+            if self.cal.guided_pairs and self.cal.glasses_enabled and eyes != "absent":
+                cue = ("Glasses ON. " if self.cal.stage.key.startswith("glasses_") else "Glasses OFF. ") + cue
         else:
             cue = "Keep eyes normally open. "
         self._say(cue + "Three, two, one. Begin.", callback, role="countdown")
@@ -479,6 +481,7 @@ class App:
             count = int(self.monitor_count_var.get())
             glasses_enabled = bool(getattr(self, "glasses_setup_var", None) and self.glasses_setup_var.get())
             self.cal = CalibrationSession(monitor_count=count, glasses_enabled=glasses_enabled)
+            self.cal.guided_pairs = bool(getattr(self, "guided_calibration", False))
         except (ValueError, TypeError) as exc:
             self.state = "PREVIEW"
             self.detail.set(str(exc)); return
@@ -507,7 +510,8 @@ class App:
         self._input_epoch = time.monotonic()
         stage = self.cal.stage
         eye_notice = "Keep your eyes OPEN until you hear Begin. " if stage.eyes in ("closed", "half") else ""
-        text = f"Step {self.cal.index + 1} of {self.cal.total_steps}. {eye_notice}{stage.instruction} Press space when ready."
+        prefix = self.cal.label if self.cal.guided_pairs else f"Step {self.cal.index + 1} of {self.cal.total_steps}"
+        text = f"{prefix}. {eye_notice}{stage.instruction} Press space when ready."
         self.cal_text.set(text)
         self.status.set(self.cal.label + " · INSTRUCTION")
         self.detail.set("SPACE skips this instruction and starts the countdown. R retries; B goes back, including during speech.")
@@ -599,6 +603,9 @@ class App:
             if not profile.report.get("reclined_eyes_valid"):
                 self.log("Reclined eyes are unobservable. Recline will cause tracking warnings; re-aim camera for eye coverage.")
         except (ValueError, TypeError, OSError) as exc:
+            if hasattr(self, "_calibration_failed"):
+                self._calibration_failed(exc)
+                return
             self.cal_phase, self.cal_good = "REVIEW", False
             self.detail.set("Calibration REJECTED: " + str(exc))
             self._say("Calibration was not accepted. " + str(exc) + ". Use Choose stage to repeat a labelled sample. Your previous calibration was not overwritten.")

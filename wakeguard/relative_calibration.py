@@ -6,7 +6,7 @@ from .model import Profile, SCHEMA, finite, median, scene_distance
 from .face_context import valid_shape, neck_separation, delta_shape
 
 
-def _attach_glasses(session, profile, screen_pairs, summarize, view_clusters, CalibrationError):
+def _attach_glasses(session, profile, screen_pairs, summarize, view_clusters, CalibrationError, partial=False):
     """Attach glasses-on eye references plus a personalized on/off classifier.
 
     Glasses enrollment is a compatibility measurement, not another pass/fail
@@ -22,11 +22,14 @@ def _attach_glasses(session, profile, screen_pairs, summarize, view_clusters, Ca
     for index, off_open, _, _ in screen_pairs:
         on_open = session.glasses_open_samples.get(index, [])
         on_closed = session.glasses_closed_samples.get(index, [])
+        targets = [("glasses_on_open", index), ("glasses_on_closed", index)]
         if not on_open or not on_closed:
-            raise CalibrationError(f"Glasses screen {index+1}: open/closed compatibility captures are missing.")
+            if partial:
+                continue
+            raise CalibrationError(f"Glasses screen {index+1}: open/closed compatibility captures are missing.", targets)
         a,b = summarize(on_open),summarize(on_closed)
         if not valid_shape(a.get("shape")) or not valid_shape(b.get("shape")) or Profile.view_distance(a,b) > 35:
-            raise CalibrationError(f"Glasses screen {index+1}: the face context changed too much between the two short takes. Repeat only this screen pair.")
+            raise CalibrationError(f"Glasses screen {index+1}: the face context changed too much between the two short takes. Repeat only this screen pair.", targets)
         usable=[]
         for side in ("left","right"):
             if not finite(a.get(side)) or not finite(b.get(side)):
@@ -63,7 +66,9 @@ def _attach_glasses(session, profile, screen_pairs, summarize, view_clusters, Ca
         if not sides:
             coverage[str(index+1)]={"open":0.0,"closed":0.0,"eye_observable":False}
             continue
-        on_closed=session.glasses_closed_samples[index]
+        on_closed=session.glasses_closed_samples.get(index, [])
+        if not on_closed:
+            continue
         open_good=sum(bool(r) and min(r)>=.70 for o in on_open if (r:=profile.eye_ratios(o,glasses_state="on")) is not None)/len(on_open)
         closed_good=sum(bool(r) and min(r)<.35 for o in on_closed if (r:=profile.eye_ratios(o,glasses_state="on")) is not None)/len(on_closed)
         coverage[str(index+1)]={"open":open_good,"closed":closed_good,"eye_observable":min(open_good,closed_good)>=.65}
@@ -77,7 +82,7 @@ def _attach_glasses(session, profile, screen_pairs, summarize, view_clusters, Ca
     profile.report["glasses"]["eye_supported"] = bool(profile.report["glasses"]["open_views"] and profile.report["glasses"]["closed_views"])
 
 
-def build_relative(session):
+def build_relative(session, partial=False):
     # Imported here to avoid a module cycle with CalibrationSession.build().
     from .calibration import CalibrationError, summarize, view_clusters
     reports = {k: summarize(v) for k, v in session.samples.items()}
@@ -93,13 +98,16 @@ def build_relative(session):
     for index in range(session.monitor_count):
         op = session.monitor_samples.get(index, session.samples.get("main", []) if index == 0 else [])
         cl = session.closed_monitor_samples.get(index, session.samples.get("closed_main", []) if index == 0 else [])
+        targets = [("monitors", index), ("closed_main", index)]
         if not op or not cl:
-            raise CalibrationError(f"Work screen {index+1}: matching open/closed eye observations are still needed.")
+            if partial:
+                continue
+            raise CalibrationError(f"Work screen {index+1}: matching open/closed eye observations are still needed.", targets)
         if not all(valid_shape(o.shape) for o in op+cl):
-            raise CalibrationError(f"Work screen {index+1}: mixed measurement methods. Restart this camera setup.")
+            raise CalibrationError(f"Work screen {index+1}: mixed measurement methods. Repeat this screen pair.", targets)
         a,b = summarize(op),summarize(cl)
         if Profile.view_distance(a,b) > 35:
-            raise CalibrationError(f"Work screen {index+1}: open and closed captures describe different camera views. Repeat only this screen pair.")
+            raise CalibrationError(f"Work screen {index+1}: open and closed captures describe different camera views. Repeat only this screen pair.", targets)
         usable = []
         for side in ("left", "right"):
             if not finite(a.get(side)) or not finite(b.get(side)):
@@ -109,7 +117,7 @@ def build_relative(session):
             if gap >= max(.035, 3*noise):
                 usable.append(side)
         if not usable:
-            raise CalibrationError(f"Work screen {index+1}: the camera could not distinguish open from closed eyelids. This is a sensor limitation, not a posture failure.")
+            raise CalibrationError(f"Work screen {index+1}: the camera could not distinguish open from closed eyelids. This is a sensor limitation, not a posture failure.", targets)
         screen_pairs.append((index,op,cl,usable))
         for view in view_clusters(op):
             for side in ("left","right"):
@@ -212,8 +220,8 @@ def build_relative(session):
         closed_match=sum(bool(rs) and min(rs)<.35 for o in cl if (rs:=profile.eye_ratios(o)) is not None)/len(cl)
         coverage[str(index+1)]={"open":open_match,"closed":closed_match}
         if min(open_match,closed_match)<.65:
-            raise CalibrationError(f"Work screen {index+1}: the camera's eye observations are not separable across normal motion. Repeat this screen's open/closed pair, not all postures.")
+            raise CalibrationError(f"Work screen {index+1}: the camera's eye observations are not separable across normal motion. Repeat this screen's open/closed pair, not all postures.", [("monitors", index), ("closed_main", index)])
     report["monitor_reference_coverage"]=coverage
-    _attach_glasses(session, profile, screen_pairs, summarize, view_clusters, CalibrationError)
+    _attach_glasses(session, profile, screen_pairs, summarize, view_clusters, CalibrationError, partial=partial)
     profile.validate()
     return profile

@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from .face_context import valid_shape, shape_distance
 from .model import Observation, Profile, SCHEMA, angle_delta, finite, median, robust_spread, scene_distance
+from .calibration_progress import CalibrationProgress
 
 
 @dataclass(frozen=True)
@@ -55,7 +56,9 @@ GLASSES_STAGES = (
 
 
 class CalibrationError(ValueError):
-    pass
+    def __init__(self, message, targets=()):
+        super().__init__(message)
+        self.targets = list(targets)
 
 
 def summarize(samples: list[Observation]) -> dict:
@@ -134,7 +137,7 @@ def measurement_issue(o: Observation, now: float, stage: Stage) -> str:
     return ""
 
 
-class CalibrationSession:
+class CalibrationSession(CalibrationProgress):
     """Labelled capture with bounded recovery time and per-screen coverage."""
     def __init__(self, monitor_count: int = 1, glasses_enabled: bool = False) -> None:
         if isinstance(monitor_count, bool) or monitor_count not in (1, 2, 3):
@@ -161,6 +164,11 @@ class CalibrationSession:
         self.latest_issue = ""
         self.final_issue = ""
         self.recording = False
+        self.guided_pairs = False
+        self.issues = {}
+        self.pending_pairs = set()
+        self.retained_previous = set()
+        self.retake_note = ""
 
     @property
     def stages(self):
@@ -182,6 +190,8 @@ class CalibrationSession:
     @property
     def stage(self) -> Stage:
         base = self.stages[self.index]
+        if self.guided_pairs and self.glasses_enabled and not base.key.startswith("glasses_") and base.eyes != "absent":
+            base = replace(base, instruction="Glasses OFF for this capture. " + base.instruction)
         if self.screen_stage:
             name = ("MAIN work screen", "SECOND work screen", "THIRD work screen")[self.monitor_index]
             if base.key == "closed_main":
@@ -194,6 +204,8 @@ class CalibrationSession:
 
     @property
     def label(self) -> str:
+        if self.guided_pairs:
+            return self.capture_title(self.stage.key, self.monitor_index)
         label = f"Step {self.index + 1}/{self.total_steps}"
         if self.screen_stage:
             label += f" · screen {self.monitor_index + 1}/{self.monitor_count}"
@@ -302,6 +314,9 @@ class CalibrationSession:
                 f"Time limit {max(0, self.stage.time_limit - elapsed):.0f}s. R retries; B goes back.")
 
     def finish(self) -> None:
+        self.finish_preserving_samples()
+
+    def _finish_capture(self) -> None:
         self.recording = False
         optional = self.stage.key not in ("main", "monitors", "closed_main", "glasses_on_open", "glasses_on_closed")
         if self.relative and optional and (self.final_issue or not self.quality_met):
@@ -336,6 +351,8 @@ class CalibrationSession:
                                      "usable_seconds": self.valid_seconds, "rejected": dict(self.rejected)}
 
     def advance(self) -> bool:
+        if self.guided_pairs:
+            return self.next_needed()
         if self.screen_stage and self.monitor_index + 1 < self.monitor_count:
             self.monitor_index += 1
             return True
@@ -347,6 +364,11 @@ class CalibrationSession:
         return True
 
     def repeat_previous(self) -> None:
+        if self.guided_pairs:
+            tasks = self.capture_tasks()
+            position = tasks.index(self.capture_position())
+            self.select_capture(*tasks[max(0, position - 1)])
+            return
         if self.screen_stage and self.monitor_index > 0:
             self.monitor_index -= 1
         else:

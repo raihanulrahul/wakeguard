@@ -16,19 +16,36 @@ from .alarms import dpi_awareness
 from .brightness import BrightnessController
 from .dashboard import Dashboard
 from .model import atomic_json
-from .calibration import CalibrationError
+from .calibration import CalibrationError, CalibrationSession
 from .face_context import valid_shape
 from .runtime import worker_python
 
 
 class App(CalibrationController):
+    guided_calibration = True
+
     def __init__(self, root, demo=False, testing=False):
         self.screen_test_done = False
         self.screen_only_choice = False
         self.alert_consent = False
         self.capture_limited = False
         self.limitations_confirmed = False
+        self.draft = None
+        self.draft_config = {}
+        self.draft_save_error = ""
+        self.repair_targets = []
+        self.cal_save_failed = False
         super().__init__(root, demo=demo, testing=testing)
+        self.draft_path = self.home / "calibration-draft-v1.json"
+        if self.draft_path.exists() and not self.demo:
+            try:
+                self.draft, self.draft_config = CalibrationSession.load_draft(self.draft_path)
+                self.monitor_count_var.set(str(self.draft.monitor_count))
+                self.glasses_setup_var.set(self.draft.glasses_enabled)
+                self.detail.set("Saved calibration progress found. Preview the unchanged camera setup, then resume.")
+            except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+                self.detail.set("The saved draft could not be read. Your finished calibration is unchanged.")
+                self.log("Calibration draft could not be loaded: " + type(exc).__name__, "DRAFT_ERROR")
         self.screen.brightness = self.brightness
         self._fit_window()
         if not self.demo and not self.testing and self.profile is not None and self.profile.report.get("context_method") != "face-relative-v1":
@@ -85,6 +102,10 @@ class App(CalibrationController):
     def save_glasses_preferences(self):
         if not hasattr(self, "glasses_mode_var"):
             return
+        if self.cal is not None and self.state == "CALIBRATING":
+            # The setup control is disabled during capture; also guard programmatic
+            # changes so a preference cannot silently disagree with the active plan.
+            self.glasses_setup_var.set(self.cal.glasses_enabled)
         self.settings["glasses_setup"] = bool(self.glasses_setup_var.get())
         self.settings["glasses_mode"] = self.glasses_mode_var.get() if self.glasses_mode_var.get() in ("Auto", "On", "Off") else "Auto"
         try:
@@ -115,18 +136,176 @@ class App(CalibrationController):
 
     def begin_calibration(self):
         self.view.select("setup")
+        if self.state in ("CALIBRATING", "VERIFYING", "MONITORING") or self.speech.busy or self._dialog_depth:
+            return super().begin_calibration()
+        if not self.audio_confirmed or self.latest is None or not self.latest.camera_ok or not 0 <= time.monotonic()-self.latest.t <= 1:
+            return super().begin_calibration()
         if self.latest and self.latest.diagnostics.get("target_status", "locked") != "locked":
             self.detail.set("Select your face in Preview first. Only the GREEN tracking box provides calibration data.")
             return
+        if self.draft is not None:
+            return self.resume_calibration()
         self.save_glasses_preferences()
         if self.glasses_setup_var.get() and not (self.testing or self.demo):
-            if not messagebox.askokcancel("Glasses calibration",
+            if not self._ask_setup(messagebox.askokcancel, "Glasses calibration",
                     "Start the main calibration with your glasses OFF. Use your normal posture; do not freeze your head.\n\n"
-                    "At the final two steps WakeGuard will tell you to put your glasses ON, then it will collect short open/closed eye references for each work screen.\n\n"
+                    "At the end WakeGuard will tell you to put your glasses ON, then collect and check a short open/closed pair for each work screen.\n\n"
                     "Automatic glasses detection is personalized. If the visual signatures overlap, Auto will report uncertainty and the On/Off switch remains the hard override.",
                     parent=self.root):
                 return
+            if self.closing or self.latest is None:
+                return
+        self.draft_config = {"camera": self.camera_var.get(), "backend": self.backend.get()}
         super().begin_calibration()
+        if self.cal is not None:
+            self.cal.guided_pairs = True
+            self.draft_config = {"camera": self.camera_var.get(), "backend": self.backend.get()}
+            self._save_calibration_progress()
+            self.view.render()
+
+    def _save_calibration_progress(self):
+        if self.cal is None:
+            return
+        self.draft = self.cal
+        if self.demo and not self.testing:
+            return
+        try:
+            self.cal.save_draft(self.draft_path, self.draft_config)
+            self.draft_save_error = ""
+        except (OSError, ValueError, TypeError) as exc:
+            self.draft_save_error = "Progress is kept in this window, but could not be saved to disk."
+            self.log(self.draft_save_error + " " + type(exc).__name__, "DRAFT_ERROR")
+
+    def resume_calibration(self):
+        if self.draft is None or self.state in ("CALIBRATING", "VERIFYING", "MONITORING") or self.speech.busy:
+            return
+        if not self.audio_confirmed:
+            self.detail.set("Test spoken instructions first, then resume your saved captures.")
+            return
+        if self.latest is None or not self.latest.camera_ok or not 0 <= time.monotonic()-self.latest.t <= 1:
+            self.detail.set("Start camera preview before resuming.")
+            return
+        if self.latest.diagnostics.get("target_status", "locked") != "locked":
+            self.detail.set("Select your face in Preview before resuming.")
+            return
+        expected = {o.camera_key for values in self.draft.samples.values() for o in values}
+        config = {"camera": self.camera_var.get(), "backend": self.backend.get()}
+        if (expected and expected != {self.latest.camera_key}) or config != self.draft_config:
+            self.detail.set("This draft belongs to a different camera setup. Restore that camera, or explicitly start a new calibration.")
+            return
+        if not self.testing and not self._ask_setup(messagebox.askokcancel, "Resume saved calibration",
+                "Resume only if the camera position, chair setup and lighting have not changed.\n\n"
+                "Completed captures will be kept. If you moved the camera, cancel and choose Start new calibration instead.", parent=self.root):
+            return
+        if self.closing or self.latest is None:
+            return
+        self.cal = self.draft
+        self.monitor_count_var.set(str(self.cal.monitor_count))
+        self.glasses_setup_var.set(self.cal.glasses_enabled)
+        self.state, self.verified = "CALIBRATING", False
+        self.cal_save_failed = False
+        self.root.focus_set()
+        if self.voice_enabled.get():
+            self._start_voice()
+        if self.cal.next_needed():
+            self._prompt_stage()
+        else:
+            self._finish_calibration()
+        self.view.render()
+
+    def new_calibration(self):
+        if self.state in ("CALIBRATING", "VERIFYING", "MONITORING") or self.speech.busy:
+            return
+        if self.draft is not None:
+            if not self.testing and not self._ask_setup(messagebox.askyesno, "Start a new calibration?",
+                    "Your saved progress will be archived locally. Start again only if you changed the camera setup or want new references.\n\n"
+                    "To keep working on these captures, choose Resume instead.", parent=self.root):
+                return
+            if self.closing or self.state not in ("STOPPED", "PREVIEW"):
+                return
+            try:
+                self.draft.save_draft(self.draft_path, self.draft_config)
+            except (OSError, ValueError, TypeError):
+                self.detail.set("Could not archive the saved progress. It has been kept in this window; a new calibration was not started.")
+                return
+            if self.draft_path.exists():
+                from datetime import datetime
+                try:
+                    self.draft_path.rename(self.home / ("calibration-draft-backup-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".json"))
+                except OSError:
+                    self.detail.set("Could not archive the saved draft. It has been kept; new calibration was not started.")
+                    return
+            self.draft = None
+        self.begin_calibration()
+
+    def repeat_capture(self, key, screen=0):
+        if self.state != "CALIBRATING" or self.cal is None or self._dialog_depth:
+            return
+        lowered = self.eyes_lowered_possible
+        self._cancel_speech()
+        self.cal.select_capture(key, screen)
+        self.cal_phase = "PROMPT"
+        prepare = lambda: self._prompt_stage(brief=False)
+        if lowered:
+            self._recover_eyes(prepare)
+        else:
+            prepare()
+
+    def retry_screen_pair(self):
+        if self.cal is None or not self.repair_targets:
+            return
+        self.cal.mark_repair(self.repair_targets, "Repeat this monitor's open/closed pair")
+        self.repeat_capture(*self.repair_targets[0])
+
+    def keep_previous_capture(self):
+        if self.cal is None or self.state != "CALIBRATING" or self.cal_phase != "REVIEW":
+            return
+        if self.cal.keep_previous():
+            self._cancel_speech()
+            self.cal_good = True
+            self.repair_targets = []
+            self.cal_text.set("Earlier successful capture kept. Continue when ready.")
+            self._save_calibration_progress()
+            self.view.render()
+
+    def add_glasses_steps(self):
+        if self.cal is None or self.cal.glasses_enabled or self.cal_phase not in ("READY", "REVIEW") or self.speech.busy:
+            return
+        session = self.cal
+        if not self.testing and not self._ask_setup(messagebox.askyesno, "Add glasses without restarting",
+                "Were your glasses OFF for all base captures so far?\n\n"
+                "If yes, the completed captures stay saved and short glasses-on pairs are added at the end. Keep glasses OFF until instructed.\n\n"
+                "If no, choose No; these captures cannot be labelled glasses-off.", parent=self.root):
+            self.detail.set("Keep this draft. Base eye captures made with glasses need corrected references before adding an off/on comparison.")
+            return
+        if self.closing or self.state != "CALIBRATING" or self.cal is not session:
+            return
+        self.cal.glasses_enabled = True
+        self.glasses_setup_var.set(True)
+        self.save_glasses_preferences()
+        self._save_calibration_progress()
+        self.detail.set("Glasses steps added. All saved captures kept. Stay glasses-OFF until prompted.")
+        self.view.render()
+
+    def choose_stage(self):
+        if self.state != "CALIBRATING" or self.cal is None:
+            return
+        # The visible checklist selects an actual capture, including monitor.
+        self.view.show_capture_list()
+
+    def _calibration_failed(self, exc):
+        self.cal_phase, self.cal_good = "REVIEW", False
+        self.cal_save_failed = isinstance(exc, OSError)
+        self.repair_targets = getattr(exc, "targets", [])
+        if self.repair_targets:
+            self.cal.mark_repair(self.repair_targets, str(exc))
+            self.cal.select_capture(*self.repair_targets[0])
+        self.detail.set(str(exc))
+        self.cal_text.set(("Could not save the completed calibration. Try saving again; no captures need repeating. "
+                           if self.cal_save_failed else "Needs attention: ") + str(exc))
+        self._save_calibration_progress()
+        self._say(self.cal_text.get(), role="notice")
+        self.log("Calibration kept for repair: " + str(exc), "CALIBRATION_RETRY")
 
     def begin_verification(self):
         self.view.select("setup")
@@ -192,12 +371,19 @@ class App(CalibrationController):
 
     def stop_all(self):
         try:
+            if self.cal is not None:
+                self.cal.cancel_capture()
+                self._save_calibration_progress()
             super().stop_all()
         finally:
             if hasattr(self, "brightness"):
                 self.brightness.stop()
             if not self.closing and hasattr(self, "view"):
                 self.preview_label.configure(height=5)
+                if self.draft is not None:
+                    self.cal_text.set("Calibration paused. Completed captures are kept; Preview and Resume when ready.")
+                    self.detail.set(self.draft_save_error or "Completed captures saved locally. The unfinished take will need repeating.")
+                self.view.render()
 
     def quit(self):
         if self.closing:
@@ -227,24 +413,30 @@ class App(CalibrationController):
 
     def _capture_done(self):
         self.capture_limited = False
+        self.repair_targets = []
         if not self.cal.relative:
             return super()._capture_done()
         stage = self.cal.stage
         try:
             self.cal.finish()
             self.cal_good = True
-            self.capture_limited = bool(self.cal.capture_reports.get(stage.key, {}).get("unavailable"))
+            report = self.cal.capture_reports.get(self.cal.capture_report_key(*self.cal.capture_position()), {})
+            self.capture_limited = bool(report.get("unavailable") or report.get("eye_limited"))
             if self.capture_limited:
-                result = "This supporting measurement is unavailable. Your eye setup is kept. Press Space to continue, or R to retry this optional measurement."
+                result = ("This glasses view is eye-limited. Saved with eyes marked unknown; posture and movement provide support. Continue, or repeat if you want another take."
+                          if report.get("eye_limited") else "This supporting measurement is unavailable. Your eye setup is kept. Continue, or repeat this optional measurement.")
                 self.log(f"{self.cal.label}: supporting channel unavailable; earlier eye references retained.", "CALIBRATION_LIMIT")
             else:
-                result = "Reference collected. Press Space to continue, or R to repeat."
+                result = self.cal.retake_note or ("Capture saved. " + ("Open and closed eyes checked together. " if stage.key in ("closed_main", "glasses_on_closed") else "") + "Continue when ready, or repeat only this capture.")
                 self.log(f"{self.cal.label}: {self.cal.quality_summary()}. Head-angle fit is not an eye-data requirement.", "CALIBRATION_SAMPLE")
         except CalibrationError as exc:
             self.cal_good = False
+            self.repair_targets = getattr(exc, "targets", [])
             self.detail.set(str(exc))
             self.log(str(exc), "CALIBRATION_SENSOR_LIMIT")
-            result = "The camera could not collect enough eye detail in this view. This is not a posture failure. Check the tracking box and measurement reason. R repeats this view; B goes back."
+            reason = str(exc) if self.repair_targets else (self.cal.final_issue or self.cal.latest_issue or "Not enough usable eye measurements in this take.")
+            result = self.cal.label + " needs a retry. " + reason + " Other saved captures are kept."
+        self._save_calibration_progress()
         self.cal_phase = "PROMPT"
         self.cal_text.set(result)
         def review():
@@ -258,10 +450,24 @@ class App(CalibrationController):
 
     def _prompt_stage(self, brief=False):
         self.capture_limited = False
+        self.cal_save_failed = False
+        self.repair_targets = []
         super()._prompt_stage(brief=brief)
+        if self.cal is not None:
+            self._save_calibration_progress()
+        if hasattr(self, "view"):
+            self.view.canvas.yview_moveto(0)
+            self.view.render()
 
     def _finish_calibration(self):
         super()._finish_calibration()
+        if self.state == "PREVIEW" and self.cal is None:
+            self.draft = None
+            self.draft_save_error = ""
+            try:
+                self.draft_path.unlink(missing_ok=True)
+            except OSError:
+                self.log("Calibration saved, but old draft could not be removed.", "DRAFT_ERROR")
         if self.state == "PREVIEW" and self.profile and self.profile.report.get("context_method") == "face-relative-v1":
             limits = self._channel_limits()
             self.limitations_confirmed = False

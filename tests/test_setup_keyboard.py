@@ -114,7 +114,7 @@ class SetupKeyboardTests(unittest.TestCase):
         self.assertIs(self.app.cal, original)
         self.assertEqual(self.app.cal.index, 1)
         self.assertEqual(self.app.cal_phase, "READY")
-        self.assertIn("Step 2 of 15", self.app.cal_text.get())
+        self.assertIn("Monitor 1 · Eyes open", self.app.cal_text.get())
 
     def test_calibrate_command_is_idempotent_during_setup(self):
         original = self.ready()

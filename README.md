@@ -1,4 +1,4 @@
-# WakeGuard 0.3 — guided desktop testing build
+# WakeGuard 0.5.1 — resumable guided calibration
 
 A local Windows desk-alert assistant with personalized eyelid/head/recline calibration, a guided modern dashboard, independent full-screen/iPhone sound channels, and temporary maximum brightness on supported displays.
 
@@ -26,15 +26,15 @@ Double-click the **WakeGuard desktop shortcut** or **Start-WakeGuard.cmd**. No t
 
 Packaged installation: close WakeGuard, then double-click `Update-WakeGuard.cmd`. It checks that managed source was not locally edited, backs up source, checks the running-instance lock, and reuses private environments. It never force-resets user edits or repurposes an unrelated folder.
 
-Existing Git checkout (such as `D:\Codes\wakeguard`): close the app, inspect `git status`, preserve any edits, then `git pull --ff-only origin main` and launch `Start-WakeGuard.cmd`. This 0.2.2→0.3.0 update needs no dependency reinstall. **Do not run the package installer over a Git checkout.** For dependency updates in an existing checkout, use `Setup-WakeGuard-Private.ps1`, not a global pip command.
+Existing Git checkout (such as `D:\Codes\wakeguard`): close the app, inspect `git status`, preserve any edits, then `git pull --ff-only origin main` and launch `Start-WakeGuard.cmd`. The 0.5.0→0.5.1 update needs no dependency changes. **Do not run the package installer over a Git checkout.** For dependency updates in an existing checkout, use `Setup-WakeGuard-Private.ps1`, not a global pip command.
 
 ## Follow the next-step card
 
 The large **YOUR NEXT STEP** card guides the sequence. The sidebar separates Guided setup, Live view, Alert settings and Diagnostics. Stop, Quit and Acknowledge stay in the footer; technical logs are no longer mixed with every normal action.
 
-1. Start camera preview and select the correct camera/backend. Look at your normal work screen, not necessarily the webcam. Set Screens used for work to 1, 2 or 3.
+1. Start camera preview and select the correct camera/backend. Look at your normal work screen, not necessarily the webcam. Set Work monitors to 1, 2 or 3 and choose **I wear glasses at this desk** in the fixed top card, before starting.
 2. Test speech and confirm you heard it. Optional offline English voice commands can be enabled, but keyboard/buttons remain available.
-3. Calibrate, using labelled eye/posture samples. Step 2 has a separate take for each selected work screen. Read on the named screen during that take, not continuously between screens.
+3. Start with glasses OFF. After the normal posture capture, each monitor gets an open/closed pair and an immediate separation check. Natural small movements are expected. Glasses-ON pairs follow at the end when enabled.
 4. Verify today's setup. Saved calibration can be reused only when current geometry passes.
 5. Test the screen alert and acknowledge it. Configure and test Find My, or explicitly choose **screen-only TEST mode**.
 6. Select Normal / High Alert / Super Alert in Live view and Start monitoring.
@@ -50,7 +50,16 @@ The app does not silently start monitoring after installation or calibration. Af
 
 Eyes-open stages say Sample complete. Only closed/half-closed stages require Open your eyes; empty-chair completion says You may return to your chair. The brief reopen cue cannot be skipped to start another eye-closed take. Closed captures remain bounded at 3 seconds; half-closed at 5 seconds. Open-eye captures can extend only to a bounded deadline if quality recovers. Poor measurements are not automatically labelled safe.
 
-The calibration has 15 labelled stages covering normal work, individual screens, side angles, reading, neck down/up, recline, half/closed eyelids and empty chair. It validates separation, direction and sample quality; rejects stale/inverted samples; and backs up prior accepted calibration. Moving the camera requires restarting full calibration so old and new geometry are not mixed. See `docs/CALIBRATION_USABILITY_FIX.md` for technical detail.
+The calibration retains the original posture labels and adds glasses references when selected. The progress bar counts actual captures (including individual monitors). A second bar shows usable data during the current take. Instructions, progress and primary actions stay fixed above the scrolling preview/checklist.
+
+- **Retry this capture** repeats only the named monitor/capture. **Repeat monitor pair** collects that screen's open/closed pair, then skips all other saved captures.
+- Select a row in **Your calibration captures** and click **Repeat selected capture** to revisit an exact view. Saved, pending, limited and retry states are explicit. A failed replacement keeps the earlier successful take; **Keep earlier successful capture** is available when that take remains valid.
+- Every completed take is saved as numeric data in a local draft. **Stop / Quit** pauses the session; after reopening, Preview, test speech and **Resume calibration**. The unfinished take needs repeating. Resume requires the same camera identity and confirmation that placement/lighting are unchanged.
+- If glasses were missed initially, **Add glasses steps to this calibration** appends the short glasses-on pairs after confirming the base captures were glasses-off. Existing successful captures stay saved. Setup choices cannot silently change the active session.
+- Glasses glare can produce **Limited · saved**, with eyes unknown, instead of forcing endless retries. A disk-save failure offers **Try saving again**, without recapture.
+- **Start new calibration…** is explicit and archives an existing draft. Moving the camera requires a new calibration so old and new geometry are not mixed.
+
+Draft saving begins in 0.5.1. Unsaved, unfinished samples from an already closed 0.5.0 session cannot be reconstructed. Existing valid finished profiles and their backups remain usable.
 
 ## Vivid alerts and brightness
 
