@@ -262,6 +262,7 @@ class RecoveryGUITests(unittest.TestCase):
         a._finish_calibration(); a.view.render()
         self.assertEqual(a.cal.capture_position(),('monitors',1))
         self.assertIn('screen 2',a.cal_text.get())
+        self.assertIn('RETRY NEEDED',a.status.get())
         self.assertTrue(a.cal.complete('closed_main',0))
         self.assertEqual(a.repair_targets,[('monitors',1),('closed_main',1)])
 

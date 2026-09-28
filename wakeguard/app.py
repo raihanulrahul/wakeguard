@@ -265,6 +265,7 @@ class App(CalibrationController):
             self.cal_good = True
             self.repair_targets = []
             self.cal_text.set("Earlier successful capture kept. Continue when ready.")
+            self._review_ready()
             self._save_calibration_progress()
             self.view.render()
 
@@ -303,6 +304,7 @@ class App(CalibrationController):
         self.detail.set(str(exc))
         self.cal_text.set(("Could not save the completed calibration. Try saving again; no captures need repeating. "
                            if self.cal_save_failed else "Needs attention: ") + str(exc))
+        self.status.set("Calibration · SAVE NEEDS ATTENTION" if self.cal_save_failed else self.cal.label + " · RETRY NEEDED")
         self._save_calibration_progress()
         self._say(self.cal_text.get(), role="notice")
         self.log("Calibration kept for repair: " + str(exc), "CALIBRATION_RETRY")
