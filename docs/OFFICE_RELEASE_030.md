@@ -46,4 +46,13 @@ The phone panel now contains persistent six-digit code entry, Verify and Cancel 
 
 Local offline checks: 24 phone adapter/service/privacy tests and 7 real-library synthetic HTTP integration tests passed. Integration covers missing token, unusable pre-verification token, incomplete account metadata, wrong credentials, rejected-code retry, and worker-to-panel state propagation. Network socket connections are prohibited by the integration tests. Windows CI additionally exercises inline entry at 944×668, windowless screenshots, private dependency migration from 2.6.5, package folder/lock/edit protections, PowerShell parsing and the full regression suite.
 
-Release gate: Windows verification and screenshot inspection must pass before main is updated. No real Apple account sign-in or physical phone sound has been performed by these tests; the user must deliberately connect, select their iPhone, send a test and confirm hearing it after updating. Existing local calibration files are preserved.
+Release gate passed: Windows verification and screenshot inspection completed before main was updated. No real Apple account sign-in or physical phone sound has been performed by these tests; the user must deliberately connect, select their iPhone, send a test and confirm hearing it after updating. Existing local calibration files are preserved.
+
+### Final 0.5.2 verification — 30 September 2026 UTC
+
+Tested application commit: `96ba32bd3055b888265a2d1fdcf728d7232b02c1`.
+
+- [Windows verification](https://github.com/raihanulrahul/wakeguard/actions/runs/36663463590): passed the full 254-test GUI-enabled regression suite, 7 real-library offline authentication tests, isolated vision/phone dependency checks, MediaPipe blank inference, and Windows PowerShell parsing.
+- [Office package and isolation](https://github.com/raihanulrahul/wakeguard/actions/runs/36663463535): passed installation into a path with spaces, update from pyicloud 2.6.5 to 2.7.0, existing Python/PATH/package isolation, nonempty-folder/edit/running-lock protection, and the actual pythonw launcher.
+- Inspected the final Windows screenshots at 944×668: verification guidance, code entry, Verify and Cancel are visible together; an error keeps its stage and reconnect guidance in the phone panel. The first Windows run caught clipped code entry, which was corrected and retested before release.
+- No user account, password, verification code, phone sound, physical camera or brightness write was used for these checks. The seven integration tests prohibit outbound socket connections and use synthetic HTTP responses with the real pinned Apple library. Physical sign-in and an audible phone test remain deliberate user checks.
