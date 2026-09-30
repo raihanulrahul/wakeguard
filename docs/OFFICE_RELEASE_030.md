@@ -37,3 +37,13 @@ Tested application revision: `1082a89451eb73a3fbd7983c4304552ac6cea58c`.
 - New synthetic coverage includes complete three-monitor/glasses collection with an injected Monitor 2 failure and targeted retry, immediate pair validation, failed replacements retaining prior samples, late glasses addition, local draft round trips, Stop/Quit/relaunch/resume, camera mismatch refusal, and saving failures without recapture.
 
 The release documentation follows these checks; no application, dependency or installer files changed after the tested revision. Physical glasses/glare/tracking/monitor behavior still requires the office test. Version 0.5.0 did not persist unfinished capture samples, so an unfinished 0.5.0 session cannot be carried across the update.
+
+## 0.5.2 Apple verification recovery
+
+The 2.6.5 Apple client could request a verification code and then fail inside login before WakeGuard received its pending-verification state. Upgrade the isolated phone environment to pyicloud 2.7.0, with its required rich import explicitly pinned. Keep the API object before authenticating and defer Find My device discovery until verification succeeds.
+
+The phone panel now contains persistent six-digit code entry, Verify and Cancel controls, and automatically scrolls into view when Apple requests verification. Rejected codes retain the session for bounded retries. Phone failures retain their operation stage, exception/cause types and HTTP status where available in both the panel and saved event log. Exception text, URLs, response bodies, passwords, codes and cookies are excluded from diagnostics. Test sound and heard confirmation remain separate, with exact device selection and the existing rate limit.
+
+Local offline checks: 24 phone adapter/service/privacy tests and 7 real-library synthetic HTTP integration tests passed. Integration covers missing token, unusable pre-verification token, incomplete account metadata, wrong credentials, rejected-code retry, and worker-to-panel state propagation. Network socket connections are prohibited by the integration tests. Windows CI additionally exercises inline entry at 944×668, windowless screenshots, private dependency migration from 2.6.5, package folder/lock/edit protections, PowerShell parsing and the full regression suite.
+
+Release gate: Windows verification and screenshot inspection must pass before main is updated. No real Apple account sign-in or physical phone sound has been performed by these tests; the user must deliberately connect, select their iPhone, send a test and confirm hearing it after updating. Existing local calibration files are preserved.

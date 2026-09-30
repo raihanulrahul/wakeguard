@@ -27,6 +27,42 @@ class GUITests(unittest.TestCase):
         self.app._poll();self.root.update()
         if self.app.poll_job:
             self.root.after_cancel(self.app.poll_job);self.app.poll_job=None
+    def test_phone_code_is_inline_visible_and_survives_navigation(self):
+        from test_phone import FakeChannel
+        channel = FakeChannel()
+        self.app.phone.channel = channel
+        channel.events = [{"event": "need_2fa", "message": "Enter the six-digit Apple code."}]
+        self.root.geometry("944x668")
+        self.pump()
+        view = self.app.view
+        self.assertEqual(view.page, "alerts")
+        self.assertTrue(view.phone_code.winfo_viewable())
+        self.assertGreaterEqual(view.phone_code.winfo_rooty(), view.canvas.winfo_rooty())
+        self.assertLess(view.phone_verify.winfo_rooty() + view.phone_verify.winfo_height(),
+                        view.canvas.winfo_rooty() + view.canvas.winfo_height())
+        view.phone_code.insert(0, "123456")
+        view.select("setup"); view.render(); view.focus_phone(); self.root.update()
+        self.assertEqual(view.phone_code.get(), "123456")
+        view.submit_phone_code()
+        self.assertEqual(channel.sent, [{"cmd": "otp", "code": "123456"}])
+        self.assertEqual(view.phone_code.get(), "")
+        channel.events = [{"event": "need_2fa", "message": "Code rejected. Try again."}]
+        self.pump()
+        self.assertIn("Code rejected", view.phone_message.get())
+        view.cancel_phone()
+        self.assertFalse(self.app.phone.needs_code)
+        self.assertFalse(channel.alive)
+
+    def test_phone_error_persists_in_panel_and_log(self):
+        from test_phone import FakeChannel
+        self.app.phone.channel = FakeChannel()
+        self.app.phone.channel.events = [{"event": "phone_error", "message": "Phone sign-in failed (Timeout). Reconnect."}]
+        self.pump()
+        self.app.detail.set("A later unrelated message")
+        self.app.view.render()
+        self.assertIn("sign-in failed", self.app.view.phone_message.get())
+        self.assertIn("sign-in failed", self.app.logbox.get("1.0", "end"))
+
     def test_test_flash_space_acknowledges(self):
         self.app.test_screen();self.root.update();self.assertTrue(self.app.screen.active)
         self.app.screen.windows[0].event_generate("<space>");self.root.update()

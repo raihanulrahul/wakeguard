@@ -1,2 +1,4 @@
 # Isolated .venv_phone only; protobuf requirements differ from legacy MediaPipe.
-pyicloud==2.6.5
+pyicloud==2.7.0
+# pyicloud imports its notes exporter during import; rich is not declared as a core dependency.
+rich==15.0.0

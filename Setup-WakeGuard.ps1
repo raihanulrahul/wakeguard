@@ -50,7 +50,10 @@ $vision = Join-Path $PSScriptRoot '.venv_wakeguard\Scripts\python.exe'
 $phone = Join-Path $PSScriptRoot '.venv_phone\Scripts\python.exe'
 Invoke-Checked $vision @('scripts\doctor.py')
 Invoke-Checked $phone @('-c', "import importlib.metadata,pyicloud; print('Phone import:',importlib.metadata.version('pyicloud'))")
-if (-not $SkipTests) { Invoke-Checked $vision @('-m', 'unittest', 'discover', '-s', 'tests', '-v') }
+if (-not $SkipTests) {
+    Invoke-Checked $vision @('-m', 'unittest', 'discover', '-s', 'tests', '-v')
+    Invoke-Checked $phone @('-m', 'unittest', 'discover', '-s', 'tests_phone', '-v')
+}
 Write-Host ''
 Write-Host 'Setup checks completed. Double-click Start-WakeGuard.cmd.'
 Write-Host 'First run: Preview, Test speech, Calibrate, Verify setup, Connect/test phone, START.'

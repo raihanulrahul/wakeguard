@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from wakeguard.model import data_home
+from wakeguard.phone_errors import phone_error
 
 
 def emit(event: str, **values) -> None:
@@ -18,6 +19,7 @@ def emit(event: str, **values) -> None:
 
 class FindMyService:
     def __init__(self, factory=None):
+        self.stage = "startup"
         self.factory = factory
         self.api = None
         self.selected = None
@@ -29,6 +31,7 @@ class FindMyService:
         action = cmd.get("cmd")
         if action == "login":
             self.close()
+            self.stage = "sign-in"
             if self.factory is None:
                 from pyicloud import PyiCloudService
                 self.factory = PyiCloudService
@@ -39,18 +42,14 @@ class FindMyService:
             cookies = data_home() / "icloud_session"
             cookies.mkdir(parents=True, exist_ok=True)
             self.api = self.factory(email, password, cookie_directory=str(cookies),
-                                    with_family=False, accept_terms=False)
+                                    with_family=False, accept_terms=False, authenticate=False)
+            self.api.authenticate()
             password = ""  # Library retains its own memory for this worker session.
             if getattr(self.api, "requires_2fa", False):
-                requester = getattr(self.api, "request_2fa_code", None)
-                if callable(requester):
-                    try:
-                        requester()
-                    except Exception:
-                        pass  # A code may already have been delivered by Apple.
-                return {"event": "need_2fa"}
+                return self._challenge()
             return self._devices()
         if action == "otp":
+            self.stage = "verification"
             if self.api is None:
                 raise RuntimeError("Connect first")
             self.otp_attempts += 1
@@ -58,18 +57,12 @@ class FindMyService:
                 self.close()
                 raise RuntimeError("Too many verification attempts; reconnect deliberately")
             if not self.api.validate_2fa_code(str(cmd.get("code", "")).strip()):
-                requester = getattr(self.api, "request_2fa_code", None)
-                if callable(requester):
-                    requester()
-                return {"event": "need_2fa", "message": "Code rejected. A fresh delivery was requested; check your device, or cancel."}
+                return self._challenge("Code rejected. Check the latest Apple code and try again.")
             if getattr(self.api, "requires_2fa", False):
                 return {"event": "need_2fa", "message": "Authentication incomplete"}
-            try:
-                self.api.trust_session()
-            except Exception:
-                pass
             return self._devices()
         if action == "select":
+            self.stage = "device selection"
             identifier = str(cmd.get("id", ""))
             if not self.authenticated or identifier not in self.available:
                 raise ValueError("Select an exact listed device")
@@ -79,6 +72,7 @@ class FindMyService:
                 raise RuntimeError("This device cannot play sound")
             return {"event": "ready", "name": self._data(self.selected).get("name", "Selected device")}
         if action == "play":
+            self.stage = "sound request"
             if not self.authenticated or self.selected is None:
                 raise RuntimeError("Phone not selected/authenticated")
             if getattr(self.api, "requires_2fa", False) or getattr(self.api, "requires_2sa", False):
@@ -96,7 +90,21 @@ class FindMyService:
         data = getattr(device, "data", None)
         return data if isinstance(data, dict) else {}
 
+    def _challenge(self, message="Enter the six-digit code from Apple below. Keep this connection open."):
+        self.stage = "code delivery"
+        requester = getattr(self.api, "request_2fa_code", None)
+        diagnostic = ""
+        if callable(requester):
+            try:
+                if not requester():
+                    message += " Automatic delivery was unavailable; use the code already shown on your iPhone, or cancel and reconnect."
+            except Exception as exc:
+                diagnostic = phone_error(exc, self.stage)["message"]
+                message += " Delivery could not be confirmed. Use an existing code, or cancel and reconnect."
+        return {"event": "need_2fa", "message": message, "diagnostic": diagnostic}
+
     def _devices(self):
+        self.stage = "device discovery"
         if getattr(self.api, "requires_2fa", False) or getattr(self.api, "requires_2sa", False):
             raise RuntimeError("Account needs additional authentication not completed here")
         devices = list(self.api.devices)
@@ -165,6 +173,7 @@ def main():
     emit("phone_started")
     try:
         for line in sys.stdin:
+            request = {}
             try:
                 request = json.loads(line)
                 if not isinstance(request, dict):
@@ -173,9 +182,13 @@ def main():
                 emit(response.pop("event"), **response)
                 if request.get("cmd") == "stop":
                     break
-                request.clear()
             except Exception as exc:
-                emit("phone_error", message=f"Phone operation failed ({type(exc).__name__}). Reconnect/check authentication or network.")
+                event = phone_error(exc, service.stage)
+                emit(event.pop("event"), **event)
+            finally:
+                if isinstance(request, dict):
+                    request.clear()
+                line = ""
     finally:
         service.close()
     return 0

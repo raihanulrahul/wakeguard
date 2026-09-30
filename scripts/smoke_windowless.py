@@ -38,6 +38,17 @@ def child(repository: Path, output: Path) -> None:
                 self.root.geometry('944x668')
                 self.view.select('setup')
                 snapshot('setup-small')
+                from test_phone import FakeChannel
+                self.phone.channel = FakeChannel()
+                self.phone.channel.events = [{"event": "need_2fa", "message": "Enter the six-digit code from Apple below. Keep this connection open."}]
+                for event in self.phone.poll():
+                    self._phone_event(event)
+                snapshot('phone-code')
+                self.phone.channel.events = [{"event": "phone_error", "message": "Phone sign-in failed (ConnectionError). Could not reach Apple securely. Check the network and reconnect."}]
+                for event in self.phone.poll():
+                    self._phone_event(event)
+                snapshot('phone-error')
+                self.view.select('setup')
                 self.audio_confirmed = True
                 self.state = 'CALIBRATING'
                 self.cal = natural_session(2)

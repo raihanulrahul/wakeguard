@@ -57,6 +57,7 @@ class Device:
 class API:
     requires_2fa=False;requires_2sa=False
     def __init__(self,*args,**kwargs):self.devices=[Device()]
+    def authenticate(self):pass
     def validate_2fa_code(self,code):return False
     def trust_session(self):pass
 
@@ -107,3 +108,54 @@ class ServiceTests(unittest.TestCase):
             with self.assertRaises(ValueError):s.dispatch({"cmd":cmd})
 
 if __name__=="__main__":unittest.main()
+
+class VerificationStateTests(unittest.TestCase):
+    def setUp(self):
+        self.channel = FakeChannel()
+        self.phone = PhoneBackend(self.channel)
+        self.channel.events = [{'event': 'need_2fa', 'message': 'Enter the latest Apple code.'}]
+        self.phone.poll()
+
+    def test_code_validation_does_not_send_invalid_input(self):
+        for code in ('', '123', 'abcdef', '１２３４５６'):
+            with self.assertRaises(ValueError): self.phone.otp(code)
+        self.assertEqual(self.channel.sent, [])
+        self.assertTrue(self.phone.needs_code)
+
+    def test_rejected_code_can_be_retried_without_login(self):
+        self.phone.otp('123456')
+        self.assertEqual(self.phone.pending, 'otp')
+        self.channel.events = [{'event': 'need_2fa', 'message': 'Code rejected.'}]
+        self.phone.poll()
+        self.assertTrue(self.phone.needs_code)
+        self.assertFalse(self.phone.ready)
+        self.phone.otp('654321')
+        self.assertEqual(len(self.channel.sent), 2)
+
+    def test_worker_death_while_waiting_for_code(self):
+        self.channel.alive = False
+        self.assertEqual(self.phone.poll()[0]['event'], 'phone_error')
+        self.assertFalse(self.phone.needs_code)
+
+    def test_persistent_error_and_cancel(self):
+        self.channel.events = [{'event': 'phone_error', 'message': 'Phone verification failed (Timeout).'}]
+        self.phone.poll()
+        self.assertIn('verification failed', self.phone.message)
+        self.assertFalse(self.phone.needs_code)
+        self.phone.stop()
+        self.assertFalse(self.phone.needs_code)
+
+class PrivateDiagnosticTests(unittest.TestCase):
+    def test_exception_body_and_credentials_never_exported(self):
+        from wakeguard.phone_errors import phone_error
+        from types import SimpleNamespace
+        secret = 'SECRET-password-code-cookie-email'
+        inner = ValueError(secret)
+        inner.response = SimpleNamespace(status_code=401, text=secret, url=secret)
+        outer = RuntimeError(secret)
+        outer.__cause__ = inner
+        result = phone_error(outer, 'sign-in')
+        self.assertNotIn(secret, str(result))
+        self.assertIn('sign-in', result['message'])
+        self.assertIn('RuntimeError / ValueError', result['message'])
+        self.assertIn('HTTP 401', result['message'])

@@ -72,6 +72,8 @@ def next_step(app, now=None):
     if not app.screen_only_choice and not (app.phone.ready and app.phone.heard_test and app.phone.enabled):
         if app.phone.pending:
             return NextStep(5, "Phone operation in progress", "Complete any account or device dialog. No password is stored in the repository.", "Waiting for phone…", "none", True)
+        if getattr(app.phone, "needs_code", False):
+            return NextStep(5, "Enter your Apple verification code", "The code appears on your iPhone. Enter it in the phone panel to finish signing in.", "Enter verification code", "phone_code")
         if app.phone.test_sent and not app.phone.heard_test:
             return NextStep(5, "Did your phone sound?", "Only confirm after hearing the actual iPhone. A sent request is not proof of delivery.", "I heard the phone test", "heard")
         if app.phone.ready:
@@ -422,14 +424,57 @@ class Dashboard:
         self._label(inner, "iPhone Find My", 15, True).pack(anchor="w")
         self._label(inner, "Independent phone sound, not a cellular call. Complete setup and hear a real test before enabling.", 10, color=MUTED, wraplength=650).pack(fill="x", pady=(4, 10))
         self._label(inner, "", 10, True, textvariable=a.phone_text, wraplength=650).pack(fill="x", pady=6)
-        row = tk.Frame(inner, bg=CARD); row.pack(fill="x", pady=8)
-        self._button(row, "Connect phone", a.connect_phone).pack(side="left")
-        self._button(row, "Test phone sound", a.test_phone).pack(side="left", padx=6)
-        self._button(row, "I heard the test", a.confirm_phone).pack(side="left")
+        self.phone_message = tk.StringVar(value=a.phone.message)
+        self._label(inner, "", 10, textvariable=self.phone_message, wraplength=610).pack(fill="x", pady=(0, 8))
+        self.phone_code_frame = tk.Frame(inner, bg=CARD)
+        self._label(self.phone_code_frame, "Apple verification code", 11, True).pack(anchor="w")
+        code_row = tk.Frame(self.phone_code_frame, bg=CARD); code_row.pack(fill="x", pady=6)
+        self.phone_code = ttk.Entry(code_row, width=12, font=("Consolas", 16))
+        self.phone_code.pack(side="left")
+        self.phone_code.bind("<Return>", lambda event: self.submit_phone_code())
+        self.phone_verify = self._button(code_row, "Verify code", self.submit_phone_code, "Primary.WG.TButton")
+        self.phone_verify.pack(side="left", padx=8)
+        self.phone_cancel = self._button(code_row, "Cancel connection", self.cancel_phone)
+        self.phone_cancel.pack(side="left")
+        self.phone_buttons = tk.Frame(inner, bg=CARD); self.phone_buttons.pack(fill="x", pady=8)
+        self.phone_connect = self._button(self.phone_buttons, "Connect phone", a.connect_phone)
+        self.phone_connect.pack(side="left")
+        self.phone_test = self._button(self.phone_buttons, "Test phone sound", a.test_phone)
+        self.phone_test.pack(side="left", padx=6)
+        self.phone_heard = self._button(self.phone_buttons, "I heard the test", a.confirm_phone)
+        self.phone_heard.pack(side="left")
         self._button(inner, "Use screen-only TEST mode", self.choose_screen_only).pack(anchor="w", pady=(8, 0))
         self._label(inner, "A screen may not wake you with closed eyes. Phone delivery and earbud routing cannot be guaranteed.", 9, color=MUTED, wraplength=650).pack(fill="x", pady=(10, 0))
         for var in (a.palette, a.pulse, a.boost):
             var.trace_add("write", lambda *_: self.preferences_changed())
+
+    def focus_phone(self):
+        self.select("alerts", focus=False)
+        self.render()
+        def reveal():
+            self.canvas.yview_moveto(1.0)
+            if self.app.phone.needs_code:
+                self.phone_code.focus_set()
+        self.root.after_idle(reveal)
+
+    def submit_phone_code(self):
+        if self.app.phone.pending:
+            return "break"
+        code = self.phone_code.get()
+        self.phone_code.delete(0, "end")
+        try:
+            self.app.phone.otp(code)
+        except (RuntimeError, ValueError) as exc:
+            self.app.phone.message = str(exc)
+        finally:
+            code = ""
+        self.render()
+        return "break"
+
+    def cancel_phone(self):
+        self.phone_code.delete(0, "end")
+        self.app.phone.stop()
+        self.render()
 
     def _diagnostics_page(self, page):
         a = self.app
@@ -437,6 +482,7 @@ class Dashboard:
         self._label(inner, "What WakeGuard is seeing", 15, True).pack(anchor="w")
         self._label(inner, "", 11, textvariable=a.metrics, wraplength=650).pack(fill="x", pady=14)
         self._label(inner, "", 10, textvariable=a.detail, wraplength=650).pack(fill="x", pady=8)
+        self._label(inner, "", 10, textvariable=self.phone_message, wraplength=650).pack(fill="x", pady=8)
         a.logbox = tk.Text(inner, height=12, font=("Consolas", 10), bg="#f5f8fb", fg=INK, bd=0,
                            highlightbackground=LINE, highlightthickness=1, state="disabled", wrap="word")
         a.logbox.pack(fill="both", expand=True, pady=12)
@@ -495,6 +541,7 @@ class Dashboard:
         elif step.action in ("space", "r"): a.action(step.action)
         elif step.action == "screen": self.select("alerts"); a.test_screen()
         elif step.action == "phone": self.select("alerts"); a.connect_phone()
+        elif step.action == "phone_code": self.focus_phone()
         elif step.action == "phone_test": self.select("alerts"); a.test_phone()
         elif step.action == "heard": a.confirm_phone()
         elif step.action == "start": a.start_monitoring()
@@ -518,6 +565,19 @@ class Dashboard:
     def render(self):
         a = self.app
         step = next_step(a)
+        phone = a.phone
+        self.phone_message.set(phone.message)
+        if phone.needs_code:
+            if not self.phone_code_frame.winfo_manager():
+                self.phone_code_frame.pack(fill="x", pady=(0, 8), before=self.phone_buttons)
+        else:
+            self.phone_code_frame.pack_forget()
+            self.phone_code.delete(0, "end")
+        self.phone_verify.configure(state="disabled" if phone.pending else "normal")
+        self.phone_code.configure(state="disabled" if phone.pending else "normal")
+        self.phone_connect.configure(state="disabled" if phone.pending or phone.needs_code else "normal")
+        self.phone_test.configure(state="normal" if phone.ready and not phone.pending else "disabled")
+        self.phone_heard.configure(state="normal" if phone.ready and phone.test_sent and not phone.pending else "disabled")
         self.render_calibration()
         data = (step, a.status.get(), round(a.battery.get()), a.mode.get(), a.cal_text.get(), a.glasses_mode_var.get(), a.glasses_status.get())
         if data != self.cache:

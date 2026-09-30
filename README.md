@@ -1,4 +1,4 @@
-# WakeGuard 0.5.1 — resumable guided calibration
+# WakeGuard 0.5.2 — visible Apple verification
 
 A local Windows desk-alert assistant with personalized eyelid/head/recline calibration, a guided modern dashboard, independent full-screen/iPhone sound channels, and temporary maximum brightness on supported displays.
 
@@ -26,7 +26,7 @@ Double-click the **WakeGuard desktop shortcut** or **Start-WakeGuard.cmd**. No t
 
 Packaged installation: close WakeGuard, then double-click `Update-WakeGuard.cmd`. It checks that managed source was not locally edited, backs up source, checks the running-instance lock, and reuses private environments. It never force-resets user edits or repurposes an unrelated folder.
 
-Existing Git checkout (such as `D:\Codes\wakeguard`): close the app, inspect `git status`, preserve any edits, then `git pull --ff-only origin main` and launch `Start-WakeGuard.cmd`. The 0.5.0→0.5.1 update needs no dependency changes. **Do not run the package installer over a Git checkout.** For dependency updates in an existing checkout, use `Setup-WakeGuard-Private.ps1`, not a global pip command.
+Existing Git checkout (such as `D:\Codes\wakeguard`): close the app, inspect `git status`, preserve any edits, then `git pull --ff-only origin main` and launch `Start-WakeGuard.cmd`. The 0.5.2 update changes phone dependencies: run `Setup-WakeGuard-Private.ps1` after pulling. Packaged updates install these automatically. **Do not run the package installer over a Git checkout.** For dependency updates in an existing checkout, use `Setup-WakeGuard-Private.ps1`, not a global pip command.
 
 ## Follow the next-step card
 

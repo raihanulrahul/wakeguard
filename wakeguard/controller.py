@@ -735,6 +735,10 @@ class App:
     def connect_phone(self):
         if self.state in ("CALIBRATING", "VERIFYING", "MONITORING"):
             messagebox.showinfo("WakeGuard", "Connect the phone while in Preview or Stopped, before monitoring.", parent=self.root); return
+        if self.phone.pending or self.phone.needs_code:
+            if hasattr(self, "view"):
+                self.view.focus_phone()
+            return
         dialog = tk.Toplevel(self.root); dialog.title("Find My connection"); dialog.attributes("-topmost", True)
         ttk.Label(dialog, text="Runtime-only password. Session cookies stay in local Windows app data.\nNo account credentials are stored in the repository.", wraplength=430).pack(padx=15, pady=12)
         email = ttk.Entry(dialog, width=45); email.pack(padx=15, pady=5)
@@ -755,6 +759,12 @@ class App:
     def _phone_event(self, event):
         kind = event.get("event")
         if kind == "need_2fa":
+            self.log("Apple verification required; enter the code in Alert settings.", "PHONE_VERIFY")
+            if event.get("diagnostic"):
+                self.log(event["diagnostic"], "PHONE_DELIVERY")
+            if hasattr(self, "view"):
+                self.view.focus_phone()
+                return
             code = simpledialog.askstring("Apple verification", event.get("message", "Enter the verification code sent by Apple:"), parent=self.root)
             if code:
                 self.phone.otp(code)
@@ -776,7 +786,9 @@ class App:
             self.log("Phone sound request submitted; physical audibility not verified automatically.", "PHONE_REQUEST")
         elif kind == "phone_error":
             self.detail.set(event.get("message", "Phone unavailable; reconnect before relying on it."))
-            self.log("Phone backend unavailable. Screen alert remains local.", "PHONE_ERROR")
+            self.log(event.get("message", "Phone unavailable; reconnect."), "PHONE_ERROR")
+            if hasattr(self, "view"):
+                self.view.focus_phone()
 
     def test_phone(self):
         if self.state in ("CALIBRATING", "VERIFYING"):

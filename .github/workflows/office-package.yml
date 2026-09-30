@@ -7,6 +7,9 @@ on:
       - 'Update-WakeGuard.cmd'
       - 'wakeguard_launcher.pyw'
       - 'wakeguard/**'
+      - 'phone_alarm_findmy.py'
+      - 'requirements_phone.txt'
+      - 'tests_phone/**'
       - 'scripts/smoke_windowless.py'
       - '.github/workflows/office-package.yml'
   workflow_dispatch:
@@ -57,8 +60,13 @@ jobs:
           $refused = $false
           try { & .\Install-WakeGuard.ps1 -Destination $dest -Update -SourceRef $env:GITHUB_SHA -ArchivePath "$env:RUNNER_TEMP\wg-source.zip" -NoLaunch -NoShortcut } catch { $refused = $true } finally { $hold.Dispose() }
           if (-not $refused) { throw 'Running instance protection failed' }
+          # Exercise dependency migration from the previous release in the private env.
+          & "$dest\.venv_phone\Scripts\python.exe" -m pip install pyicloud==2.6.5
+          if ($LASTEXITCODE -ne 0) { throw 'Old phone version preparation failed' }
           & .\Install-WakeGuard.ps1 -Destination $dest -Update -SourceRef $env:GITHUB_SHA -ArchivePath "$env:RUNNER_TEMP\wg-source.zip" -NoLaunch -NoShortcut
           if ($LASTEXITCODE -ne 0) { throw 'Package update failed' }
+          & "$dest\.venv_phone\Scripts\python.exe" -c "import importlib.metadata,pyicloud; assert importlib.metadata.version('pyicloud') == '2.7.0'; import rich"
+          if ($LASTEXITCODE -ne 0) { throw 'Phone dependency upgrade failed' }
           Add-Content "$dest\README.md" 'Uncommitted work must be preserved'
           $refused = $false
           try { & .\Install-WakeGuard.ps1 -Destination $dest -Update -SourceRef $env:GITHUB_SHA -ArchivePath "$env:RUNNER_TEMP\wg-source.zip" -NoLaunch -NoShortcut } catch { $refused = $true }

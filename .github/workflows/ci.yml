@@ -43,6 +43,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\.venv_phone\Scripts\python.exe -c "import pyicloud; print('Phone import passed; no network/account use')"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\.venv_phone\Scripts\python.exe -m unittest discover -s tests_phone -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Parse Windows scripts without playing sound or opening microphone
         shell: powershell
         run: |
