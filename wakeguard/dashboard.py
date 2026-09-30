@@ -425,7 +425,8 @@ class Dashboard:
         self._label(inner, "Independent phone sound, not a cellular call. Complete setup and hear a real test before enabling.", 10, color=MUTED, wraplength=650).pack(fill="x", pady=(4, 10))
         self._label(inner, "", 10, True, textvariable=a.phone_text, wraplength=650).pack(fill="x", pady=6)
         self.phone_message = tk.StringVar(value=a.phone.message)
-        self._label(inner, "", 10, textvariable=self.phone_message, wraplength=610).pack(fill="x", pady=(0, 8))
+        self.phone_message_label = self._label(inner, "", 10, textvariable=self.phone_message, wraplength=610)
+        self.phone_message_label.pack(fill="x", pady=(0, 8))
         self.phone_code_frame = tk.Frame(inner, bg=CARD)
         self._label(self.phone_code_frame, "Apple verification code", 11, True).pack(anchor="w")
         code_row = tk.Frame(self.phone_code_frame, bg=CARD); code_row.pack(fill="x", pady=6)
@@ -452,7 +453,12 @@ class Dashboard:
         self.select("alerts", focus=False)
         self.render()
         def reveal():
-            self.canvas.yview_moveto(1.0)
+            # Resolve geometry before scrolling; the bottom of this card can be
+            # below the code field on short windows and Windows display scaling.
+            self.root.update_idletasks()
+            target = self.phone_code_frame if self.app.phone.needs_code else self.phone_message_label
+            top = target.winfo_rooty() - self.workspace.winfo_rooty() - 8
+            self.canvas.yview_moveto(max(0, top) / max(1, self.workspace.winfo_height()))
             if self.app.phone.needs_code:
                 self.phone_code.focus_set()
         self.root.after_idle(reveal)
