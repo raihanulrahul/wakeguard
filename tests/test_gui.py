@@ -36,6 +36,8 @@ class GUITests(unittest.TestCase):
         self.pump()
         view = self.app.view
         self.assertEqual(view.page, "alerts")
+        from wakeguard.dashboard import next_step
+        self.assertEqual(next_step(self.app).action, "phone_code")
         self.assertTrue(view.phone_code.winfo_viewable())
         self.assertGreaterEqual(view.phone_code.winfo_rooty(), view.canvas.winfo_rooty())
         self.assertLess(view.phone_verify.winfo_rooty() + view.phone_verify.winfo_height(),

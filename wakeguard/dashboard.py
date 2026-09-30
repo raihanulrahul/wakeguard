@@ -51,6 +51,10 @@ def next_step(app, now=None):
         if app.speech_role == "countdown":
             return NextStep(index, "Get ready for capture", "The short countdown marks exactly when recording starts.", "Countdown…", "none", True)
         return NextStep(index, "Follow the current instruction", "Already know the posture? Continue skips long narration, but retains the countdown.", "I'm ready  ·  Space", "space")
+    if getattr(app.phone, "needs_code", False):
+        return NextStep(5, "Verify your Apple account", app.phone.message,
+                        "Checking code…" if app.phone.pending else "Enter verification code",
+                        "phone_code", bool(app.phone.pending))
     if not (app.latest and app.latest.camera_ok and 0 <= now - app.latest.t <= .8):
         return NextStep(1, "Let’s check your camera", "Start the preview. Look at your normal work screen, not the webcam.", "Start camera preview", "preview")
     target = app.latest.diagnostics.get("target_status", "locked")
@@ -72,8 +76,6 @@ def next_step(app, now=None):
     if not app.screen_only_choice and not (app.phone.ready and app.phone.heard_test and app.phone.enabled):
         if app.phone.pending:
             return NextStep(5, "Phone operation in progress", "Complete any account or device dialog. No password is stored in the repository.", "Waiting for phone…", "none", True)
-        if getattr(app.phone, "needs_code", False):
-            return NextStep(5, "Enter your Apple verification code", "The code appears on your iPhone. Enter it in the phone panel to finish signing in.", "Enter verification code", "phone_code")
         if app.phone.test_sent and not app.phone.heard_test:
             return NextStep(5, "Did your phone sound?", "Only confirm after hearing the actual iPhone. A sent request is not proof of delivery.", "I heard the phone test", "heard")
         if app.phone.ready:
@@ -456,7 +458,7 @@ class Dashboard:
             # Resolve geometry before scrolling; the bottom of this card can be
             # below the code field on short windows and Windows display scaling.
             self.root.update_idletasks()
-            target = self.phone_code_frame if self.app.phone.needs_code else self.phone_message_label
+            target = self.phone_message_label
             top = target.winfo_rooty() - self.workspace.winfo_rooty() - 8
             self.canvas.yview_moveto(max(0, top) / max(1, self.workspace.winfo_height()))
             if self.app.phone.needs_code:
